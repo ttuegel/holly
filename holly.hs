@@ -75,13 +75,8 @@ paint dpy = do
         rootH = height_GetGeometryReply geom
     redirectSubwindows dpy root RedirectManual
 
-    formats <- screens_QueryPictFormatsReply
-        <$> (queryPictFormats dpy >>= getReply')
     let rootVisual = root_visual_SCREEN scr
-        format = format_PICTVISUAL $ head
-            $ filter ((== rootVisual) . visual_PICTVISUAL)
-            $ concatMap visuals_PICTDEPTH
-            $ concatMap depths_PICTSCREEN formats
+    format <- findVisualFormat dpy rootVisual
 
     overlayWindow <- getOverlayWindow dpy root >>= getReply'
     overlayPicture <- newResource dpy
@@ -89,7 +84,10 @@ paint dpy = do
         { pid_CreatePicture = overlayPicture
         , drawable_CreatePicture = toDrawable overlayWindow
         , format_CreatePicture = format
-        , value_CreatePicture = toValueParam [(CPSubwindowMode, 1)]
+        , value_CreatePicture =
+            toValueParam [( CPSubwindowMode
+                          , toValue SubwindowModeIncludeInferiors
+                          )]
         }
     composite dpy $ MkComposite
         { op_Composite = PictOpSrc
@@ -106,7 +104,44 @@ paint dpy = do
         , height_Composite = rootH
         }
 
-    forever $ return ()
+    forever $ do
+        children <- children_QueryTreeReply
+            <$> (queryTree dpy root >>= getReply')
+        attrs <- mapM ((>>= getReply') . getWindowAttributes dpy) children
+        let mappedChildren = filter ( (== MapStateViewable)
+                                    . map_state_GetWindowAttributesReply
+                                    . snd
+                                    ) $ zip children attrs
+            draw (win, attrs) = do
+                pixm <- newResource dpy
+                nameWindowPixmap dpy win pixm
+                fmt <- findVisualFormat dpy
+                    $ visual_GetWindowAttributesReply attrs
+                geom <- getGeometry dpy (toDrawable win) >>= getReply'
+                let b = border_width_GetGeometryReply geom
+                pict <- newResource dpy
+                createPicture dpy $ MkCreatePicture
+                    { pid_CreatePicture = pict
+                    , drawable_CreatePicture = toDrawable pixm
+                    , format_CreatePicture = fmt
+                    , value_CreatePicture =
+                        toValueParam [(CPSubwindowMode, 1)]
+                    }
+                composite dpy $! MkComposite
+                    { op_Composite = PictOpSrc
+                    , src_Composite = pict
+                    , mask_Composite = fromXid xidNone
+                    , dst_Composite = overlayPicture
+                    , src_x_Composite = 0
+                    , src_y_Composite = 0
+                    , mask_x_Composite = 0
+                    , mask_y_Composite = 0
+                    , dst_x_Composite = x_GetGeometryReply geom
+                    , dst_y_Composite = y_GetGeometryReply geom
+                    , width_Composite = width_GetGeometryReply geom + b + b
+                    , height_Composite = height_GetGeometryReply geom + b + b
+                    }
+        mapM_ draw mappedChildren
 
 class XidLike d => Drawable d where
     toDrawable :: d -> DRAWABLE
@@ -160,3 +195,15 @@ solidPicture dpy draw a r g b = do
         }
     freePixmap dpy pixmap
     return picture
+
+findVisualFormat :: Connection -> VISUALID -> IO PICTFORMAT
+findVisualFormat dpy vid = do
+    formats <- screens_QueryPictFormatsReply
+        <$> (queryPictFormats dpy >>= getReply')
+    return $! format_PICTVISUAL $ head
+            $ filter ((== vid) . visual_PICTVISUAL)
+            $ concatMap visuals_PICTDEPTH
+            $ concatMap depths_PICTSCREEN formats
+
+instance Eq MapState where
+    a == b = toValue a == toValue b
