@@ -30,7 +30,6 @@ getReply' rcpt = do
 
 checkExtensions :: Connection -> IO ()
 checkExtensions dpy = do
-    putStrLn "Checking extensions..."
     compositePresent <- extensionPresent dpy Composite.extension
     unless compositePresent $ error "Composite extension missing!"
     compositeVersion <- Composite.queryVersion dpy 0 3 >>= getReply'
@@ -51,21 +50,18 @@ checkExtensions dpy = do
 
 errorHandler :: Connection -> IO ()
 errorHandler dpy = do
-    putStrLn "Starting error handler..."
     void $ forkIO $ forever $ do
         err <- waitForError dpy
         putStrLn $ show err
 
 eventHandler :: Connection -> IO ()
 eventHandler dpy = do
-    putStrLn "Starting event handler..."
     void $ forkIO $ forever $ do
         ev <- waitForEvent dpy
         return ()
 
 paint :: Connection -> IO ()
 paint dpy = do
-    putStrLn "Starting paint..."
     let scrNum = screen $ displayInfo dpy
         scr = (!! scrNum) $ roots_Setup $ connectionSetup dpy
         root = root_SCREEN scr
