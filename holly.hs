@@ -4,6 +4,7 @@ import Control.Applicative ( (<$>) )
 import Control.Concurrent ( forkIO )
 import Control.Monad ( forever, unless, void )
 import Data.Maybe ( isJust )
+import Data.Word ( Word8 )
 import Graphics.XHB
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension, queryVersion, QueryVersionReply(..) )
@@ -66,7 +67,7 @@ paint dpy = do
     let scrNum = screen $ displayInfo dpy
         scr = (!! scrNum) $ roots_Setup $ connectionSetup dpy
         root = root_SCREEN scr
-    blackPicture <- solidPicture dpy (toDrawable root) 0 $ Just (0, 0, 0)
+    blackPicture <- solidPicture dpy (toDrawable root) 1.0 $ Just (0, 0, 0)
     geom <- getGeometry dpy (toDrawable root) >>= getReply'
     let rootW = width_GetGeometryReply geom
         rootH = height_GetGeometryReply geom
@@ -102,6 +103,7 @@ paint dpy = do
         }
 
     forever $ do
+        rootAttrs <- getWindowAttributes dpy root >>= getReply'
         children <- children_QueryTreeReply
             <$> (queryTree dpy root >>= getReply')
         attrs <- mapM ((>>= getReply') . getWindowAttributes dpy) children
@@ -124,10 +126,12 @@ paint dpy = do
                     , value_CreatePicture =
                         toValueParam [(CPSubwindowMode, 1)]
                     }
+                opacity <- getWindowOpacity dpy win
+                mask <- solidPicture dpy (toDrawable root) opacity Nothing
                 composite dpy $! MkComposite
                     { op_Composite = PictOpSrc
                     , src_Composite = pict
-                    , mask_Composite = fromXid xidNone
+                    , mask_Composite = mask
                     , dst_Composite = overlayPicture
                     , src_x_Composite = 0
                     , src_y_Composite = 0
@@ -138,7 +142,7 @@ paint dpy = do
                     , width_Composite = width_GetGeometryReply geom + b + b
                     , height_Composite = height_GetGeometryReply geom + b + b
                     }
-        mapM_ draw mappedChildren
+        mapM_ draw $ (root, rootAttrs) : mappedChildren
 
 class XidLike d => Drawable d where
     toDrawable :: d -> DRAWABLE
@@ -201,10 +205,8 @@ findVisualFormat dpy vid =
 
 findStandardFormat :: Connection -> Bool -> IO PICTFORMAT
 findStandardFormat dpy argb = do
-    screenFormats <- findScreenFormats dpy
     id_PICTFORMINFO . head
         . filter ((== (if argb then 32 else 8)) . depth_PICTFORMINFO)
-        . filter ((`elem` screenFormats) . id_PICTFORMINFO)
         . filter ((== PictTypeDirect) . type_PICTFORMINFO)
         . formats_QueryPictFormatsReply
         <$> (queryPictFormats dpy >>= getReply')
@@ -224,3 +226,29 @@ instance Eq MapState where
 
 instance Eq PictType where
     a == b = toValue a == toValue b
+
+getWindowOpacity :: Connection -> WINDOW -> IO Double
+getWindowOpacity dpy win = do
+    let cardinalName = stringToCList "XA_CARDINAL"
+        opacityName = stringToCList "_NET_WM_WINDOW_OPACITY"
+    cardinal <- (internAtom dpy $ MkInternAtom
+        { only_if_exists_InternAtom = True
+        , name_len_InternAtom = fromIntegral $ length cardinalName
+        , name_InternAtom = cardinalName
+        }) >>= getReply'
+    opacityAtom <- (internAtom dpy $ MkInternAtom
+        { only_if_exists_InternAtom = False
+        , name_len_InternAtom = fromIntegral $ length opacityName
+        , name_InternAtom = opacityName
+        }) >>= getReply'
+    
+
+    val <- value_GetPropertyReply <$> ((getProperty dpy $ MkGetProperty
+        { delete_GetProperty = False
+        , window_GetProperty = win
+        , property_GetProperty = opacityAtom
+        , type_GetProperty = cardinal
+        , long_offset_GetProperty = 0
+        , long_length_GetProperty = 1
+        }) >>= getReply')
+    return $ if null val then 1.0 else fromIntegral (head val) / fromIntegral 0xff
