@@ -159,10 +159,7 @@ solidPicture dpy draw a r g b = do
         , height_CreatePixmap = 1
         }
 
-    formats <- formats_QueryPictFormatsReply
-        <$> (queryPictFormats dpy >>= getReply')
-    let format = id_PICTFORMINFO $ head
-            $ filter ((== 32) . depth_PICTFORMINFO) formats
+    format <- findStandardFormat dpy True
 
     picture <- newResource dpy
     createPicture dpy $ MkCreatePicture
