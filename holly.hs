@@ -123,8 +123,10 @@ paint dpy = do
                     { pid_CreatePicture = pict
                     , drawable_CreatePicture = toDrawable pixm
                     , format_CreatePicture = fmt
-                    , value_CreatePicture =
-                        toValueParam [(CPSubwindowMode, 1)]
+                    , value_CreatePicture = toValueParam
+                        [( CPSubwindowMode
+                         , toValue SubwindowModeIncludeInferiors
+                         )]
                     }
                 opacity <- getWindowOpacity dpy win
                 mask <- solidPicture dpy (toDrawable root) opacity Nothing
@@ -142,7 +144,7 @@ paint dpy = do
                     , width_Composite = width_GetGeometryReply geom + b + b
                     , height_Composite = height_GetGeometryReply geom + b + b
                     }
-        mapM_ draw $ (root, rootAttrs) : mappedChildren
+        mapM_ draw mappedChildren
 
 class XidLike d => Drawable d where
     toDrawable :: d -> DRAWABLE
