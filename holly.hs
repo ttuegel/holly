@@ -72,7 +72,7 @@ paint dpy = do
     redirectSubwindows dpy root RedirectManual
 
     let rootVisual = root_visual_SCREEN scr
-    format <- findVisualFormat dpy scrNum rootVisual
+    format <- findVisualFormat dpy rootVisual
 
     overlayWindow <- getOverlayWindow dpy root >>= getReply'
     overlayPicture <- newResource dpy
@@ -111,7 +111,7 @@ paint dpy = do
             draw (win, attrs) = do
                 pixm <- newResource dpy
                 nameWindowPixmap dpy win pixm
-                fmt <- findVisualFormat dpy scrNum
+                fmt <- findVisualFormat dpy
                     $ visual_GetWindowAttributesReply attrs
                 geom <- getGeometry dpy (toDrawable win) >>= getReply'
                 let b = border_width_GetGeometryReply geom
@@ -192,14 +192,34 @@ solidPicture dpy draw a r g b = do
     freePixmap dpy pixmap
     return picture
 
-findVisualFormat :: Connection -> Int -> VISUALID -> IO PICTFORMAT
-findVisualFormat dpy scr vid = do
+findVisualFormat :: Connection -> VISUALID -> IO PICTFORMAT
+findVisualFormat dpy vid =
     format_PICTVISUAL . head
         . filter ((== vid) . visual_PICTVISUAL)
-        . concatMap visuals_PICTDEPTH
-        . depths_PICTSCREEN
-        . (!! scr ) . screens_QueryPictFormatsReply
+        <$> findScreenPictVisuals dpy
+
+findStandardFormat :: Connection -> Bool -> IO PICTFORMAT
+findStandardFormat dpy argb = do
+    screenFormats <- findScreenFormats dpy
+    id_PICTFORMINFO . head
+        . filter ((== (if argb then 32 else 8)) . depth_PICTFORMINFO)
+        . filter ((`elem` screenFormats) . id_PICTFORMINFO)
+        . filter ((== PictTypeDirect) . type_PICTFORMINFO)
+        . formats_QueryPictFormatsReply
         <$> (queryPictFormats dpy >>= getReply')
 
+findScreenFormats :: Connection -> IO [PICTFORMAT]
+findScreenFormats dpy =
+    map format_PICTVISUAL <$> findScreenPictVisuals dpy
+
+findScreenPictVisuals :: Connection -> IO [PICTVISUAL]
+findScreenPictVisuals dpy =
+    concatMap visuals_PICTDEPTH . depths_PICTSCREEN
+    . (!! (screen $ displayInfo dpy)) . screens_QueryPictFormatsReply
+    <$> (queryPictFormats dpy >>= getReply')
+
 instance Eq MapState where
+    a == b = toValue a == toValue b
+
+instance Eq PictType where
     a == b = toValue a == toValue b
