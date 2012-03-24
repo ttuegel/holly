@@ -3,6 +3,7 @@ module Main where
 import Control.Applicative ( (<$>) )
 import Control.Concurrent ( forkIO )
 import Control.Monad ( forever, unless, void )
+import Data.Maybe ( isJust )
 import Graphics.XHB
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension, queryVersion, QueryVersionReply(..) )
@@ -65,7 +66,7 @@ paint dpy = do
     let scrNum = screen $ displayInfo dpy
         scr = (!! scrNum) $ roots_Setup $ connectionSetup dpy
         root = root_SCREEN scr
-    blackPicture <- solidPicture dpy (toDrawable root) 0 0 0 0
+    blackPicture <- solidPicture dpy (toDrawable root) 0 $ Just (0, 0, 0)
     geom <- getGeometry dpy (toDrawable root) >>= getReply'
     let rootW = width_GetGeometryReply geom
         rootH = height_GetGeometryReply geom
@@ -147,19 +148,19 @@ instance Drawable PIXMAP
 
 instance Drawable WINDOW
 
-solidPicture :: Connection -> DRAWABLE -> Double -> Double -> Double
-             -> Double -> IO PICTURE
-solidPicture dpy draw a r g b = do
+solidPicture :: Connection -> DRAWABLE -> Double
+             -> Maybe (Double, Double, Double) -> IO PICTURE
+solidPicture dpy draw a mRGB = do
     pixmap <- newResource dpy
     createPixmap dpy $ MkCreatePixmap
-        { depth_CreatePixmap = 32
+        { depth_CreatePixmap = if isJust mRGB then 32 else 8
         , pid_CreatePixmap = pixmap
         , drawable_CreatePixmap = draw
         , width_CreatePixmap = 1
         , height_CreatePixmap = 1
         }
 
-    format <- findStandardFormat dpy True
+    format <- findStandardFormat dpy (isJust mRGB)
 
     picture <- newResource dpy
     createPicture dpy $ MkCreatePicture
@@ -168,6 +169,9 @@ solidPicture dpy draw a r g b = do
         , format_CreatePicture = format
         , value_CreatePicture = toValueParam [(CPRepeat, 1)]
         }
+    let r = maybe 0.0 (\(x, _, _) -> x) mRGB
+        g = maybe 0.0 (\(_, x, _) -> x) mRGB
+        b = maybe 0.0 (\(_, _, x) -> x) mRGB
     fillRectangles dpy $ MkFillRectangles
         { op_FillRectangles = PictOpSrc
         , dst_FillRectangles = picture
