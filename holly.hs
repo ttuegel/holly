@@ -72,7 +72,7 @@ paint dpy = do
     redirectSubwindows dpy root RedirectManual
 
     let rootVisual = root_visual_SCREEN scr
-    format <- findVisualFormat dpy rootVisual
+    format <- findVisualFormat dpy scrNum rootVisual
 
     overlayWindow <- getOverlayWindow dpy root >>= getReply'
     overlayPicture <- newResource dpy
@@ -111,7 +111,7 @@ paint dpy = do
             draw (win, attrs) = do
                 pixm <- newResource dpy
                 nameWindowPixmap dpy win pixm
-                fmt <- findVisualFormat dpy
+                fmt <- findVisualFormat dpy scrNum
                     $ visual_GetWindowAttributesReply attrs
                 geom <- getGeometry dpy (toDrawable win) >>= getReply'
                 let b = border_width_GetGeometryReply geom
@@ -192,14 +192,14 @@ solidPicture dpy draw a r g b = do
     freePixmap dpy pixmap
     return picture
 
-findVisualFormat :: Connection -> VISUALID -> IO PICTFORMAT
-findVisualFormat dpy vid = do
-    formats <- screens_QueryPictFormatsReply
+findVisualFormat :: Connection -> Int -> VISUALID -> IO PICTFORMAT
+findVisualFormat dpy scr vid = do
+    format_PICTVISUAL . head
+        . filter ((== vid) . visual_PICTVISUAL)
+        . concatMap visuals_PICTDEPTH
+        . depths_PICTSCREEN
+        . (!! scr ) . screens_QueryPictFormatsReply
         <$> (queryPictFormats dpy >>= getReply')
-    return $! format_PICTVISUAL $ head
-            $ filter ((== vid) . visual_PICTVISUAL)
-            $ concatMap visuals_PICTDEPTH
-            $ concatMap depths_PICTSCREEN formats
 
 instance Eq MapState where
     a == b = toValue a == toValue b
