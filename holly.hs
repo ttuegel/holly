@@ -2,9 +2,9 @@ module Main where
 
 import Control.Applicative ( (<$>) )
 import Control.Concurrent ( forkIO )
-import Control.Monad ( forever, unless, void )
+import Control.Monad ( forever, sequence_, unless, void )
 import Data.Maybe ( isJust )
-import Data.Word ( Word8 )
+import Data.Word ( Word8, Word16 )
 import Graphics.XHB
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension, queryVersion, QueryVersionReply(..) )
@@ -67,74 +67,65 @@ paint dpy = do
     let scrNum = screen $ displayInfo dpy
         scr = (!! scrNum) $ roots_Setup $ connectionSetup dpy
         root = root_SCREEN scr
-    blackPicture <- solidPicture dpy (toDrawable root) 1.0 $ Just (0, 0, 0)
     geom <- getGeometry dpy (toDrawable root) >>= getReply'
     let rootW = width_GetGeometryReply geom
         rootH = height_GetGeometryReply geom
     redirectSubwindows dpy root RedirectManual
 
     let rootVisual = root_visual_SCREEN scr
-    format <- findVisualFormat dpy rootVisual
+    rootFormat <- findVisualFormat dpy rootVisual
 
     overlayWindow <- getOverlayWindow dpy root >>= getReply'
     overlayPicture <- newResource dpy
-    createPicture dpy $ MkCreatePicture
+    createPicture dpy $! MkCreatePicture
         { pid_CreatePicture = overlayPicture
         , drawable_CreatePicture = toDrawable overlayWindow
-        , format_CreatePicture = format
-        , value_CreatePicture =
-            toValueParam [( CPSubwindowMode
-                          , toValue SubwindowModeIncludeInferiors
-                          )]
-        }
-    composite dpy $ MkComposite
-        { op_Composite = PictOpSrc
-        , src_Composite = blackPicture
-        , mask_Composite = fromXid xidNone
-        , dst_Composite = overlayPicture
-        , src_x_Composite = 0
-        , src_y_Composite = 0
-        , mask_x_Composite = 0
-        , mask_y_Composite = 0
-        , dst_x_Composite = 0
-        , dst_y_Composite = 0
-        , width_Composite = rootW
-        , height_Composite = rootH
+        , format_CreatePicture = rootFormat
+        , value_CreatePicture = toValueParam
+            [( CPSubwindowMode
+             , toValue SubwindowModeIncludeInferiors
+             )]
         }
 
     forever $ do
-        rootAttrs <- getWindowAttributes dpy root >>= getReply'
+        bufferFormat <- findStandardFormat dpy True
+        buffer <- createBuffer dpy (toDrawable overlayWindow) (rootW, rootH)
+                  32 bufferFormat
+
         children <- children_QueryTreeReply
             <$> (queryTree dpy root >>= getReply')
-        attrs <- mapM ((>>= getReply') . getWindowAttributes dpy) children
-        let mappedChildren = filter ( (== MapStateViewable)
-                                    . map_state_GetWindowAttributesReply
-                                    . snd
-                                    ) $ zip children attrs
-            draw (win, attrs) = do
+        childrenAttrs <- mapM (getWindowAttributes dpy) children >>= mapM getReply'
+        let childrenWithAttrs = filter viewable . filter (not . inputOnly)
+                $ zip children childrenAttrs
+            viewable =   (== MapStateViewable)
+                       . map_state_GetWindowAttributesReply
+                       . snd
+            inputOnly =   (== WindowClassInputOnly)
+                       . class_GetWindowAttributesReply
+                       . snd
+            draw (child, attrs) = do
                 pixm <- newResource dpy
-                nameWindowPixmap dpy win pixm
-                fmt <- findVisualFormat dpy
-                    $ visual_GetWindowAttributesReply attrs
-                geom <- getGeometry dpy (toDrawable win) >>= getReply'
+                nameWindowPixmap dpy child pixm
+                childFormat <- findVisualFormat dpy $! visual_GetWindowAttributesReply attrs
+                geom <- getGeometry dpy (toDrawable child) >>= getReply'
                 let b = border_width_GetGeometryReply geom
+                opacity <- getWindowOpacity dpy child
+                mask <- solidPicture dpy (toDrawable overlayWindow) opacity Nothing
                 pict <- newResource dpy
                 createPicture dpy $ MkCreatePicture
                     { pid_CreatePicture = pict
                     , drawable_CreatePicture = toDrawable pixm
-                    , format_CreatePicture = fmt
+                    , format_CreatePicture = childFormat
                     , value_CreatePicture = toValueParam
                         [( CPSubwindowMode
                          , toValue SubwindowModeIncludeInferiors
                          )]
                     }
-                opacity <- getWindowOpacity dpy win
-                mask <- solidPicture dpy (toDrawable root) opacity Nothing
                 composite dpy $! MkComposite
                     { op_Composite = PictOpSrc
                     , src_Composite = pict
                     , mask_Composite = mask
-                    , dst_Composite = overlayPicture
+                    , dst_Composite = buffer
                     , src_x_Composite = 0
                     , src_y_Composite = 0
                     , mask_x_Composite = 0
@@ -144,7 +135,25 @@ paint dpy = do
                     , width_Composite = width_GetGeometryReply geom + b + b
                     , height_Composite = height_GetGeometryReply geom + b + b
                     }
-        mapM_ draw mappedChildren
+                freePicture dpy pict
+        mapM_ draw childrenWithAttrs
+
+        composite dpy $! MkComposite
+            { op_Composite = PictOpSrc
+            , src_Composite = buffer
+            , mask_Composite = fromXid xidNone
+            , dst_Composite = overlayPicture
+            , src_x_Composite = 0
+            , src_y_Composite = 0
+            , mask_x_Composite = 0
+            , mask_y_Composite = 0
+            , dst_x_Composite = 0
+            , dst_y_Composite = 0
+            , width_Composite = rootW
+            , height_Composite = rootH
+            }
+
+        freePicture dpy buffer
 
 class XidLike d => Drawable d where
     toDrawable :: d -> DRAWABLE
@@ -157,24 +166,9 @@ instance Drawable WINDOW
 solidPicture :: Connection -> DRAWABLE -> Double
              -> Maybe (Double, Double, Double) -> IO PICTURE
 solidPicture dpy draw a mRGB = do
-    pixmap <- newResource dpy
-    createPixmap dpy $ MkCreatePixmap
-        { depth_CreatePixmap = if isJust mRGB then 32 else 8
-        , pid_CreatePixmap = pixmap
-        , drawable_CreatePixmap = draw
-        , width_CreatePixmap = 1
-        , height_CreatePixmap = 1
-        }
-
     format <- findStandardFormat dpy (isJust mRGB)
+    picture <- createBuffer dpy draw (1, 1) (if isJust mRGB then 32 else 8) format
 
-    picture <- newResource dpy
-    createPicture dpy $ MkCreatePicture
-        { pid_CreatePicture = picture
-        , drawable_CreatePicture = toDrawable pixmap
-        , format_CreatePicture = format
-        , value_CreatePicture = toValueParam [(CPRepeat, 1)]
-        }
     let r = maybe 0.0 (\(x, _, _) -> x) mRGB
         g = maybe 0.0 (\(_, x, _) -> x) mRGB
         b = maybe 0.0 (\(_, _, x) -> x) mRGB
@@ -196,7 +190,7 @@ solidPicture dpy draw a mRGB = do
                 }
             ]
         }
-    freePixmap dpy pixmap
+
     return picture
 
 findVisualFormat :: Connection -> VISUALID -> IO PICTFORMAT
@@ -229,6 +223,9 @@ instance Eq MapState where
 instance Eq PictType where
     a == b = toValue a == toValue b
 
+instance Eq WindowClass where
+    a == b = toValue a == toValue b
+
 getWindowOpacity :: Connection -> WINDOW -> IO Double
 getWindowOpacity dpy win = do
     let cardinalName = stringToCList "XA_CARDINAL"
@@ -254,3 +251,27 @@ getWindowOpacity dpy win = do
         , long_length_GetProperty = 1
         }) >>= getReply')
     return $ if null val then 1.0 else fromIntegral (head val) / fromIntegral 0xff
+
+createBuffer :: Connection -> DRAWABLE -> (Word16, Word16) -> Word8
+             -> PICTFORMAT -> IO PICTURE
+createBuffer dpy draw (w, h) depth format = do
+    pixmap <- newResource dpy
+    createPixmap dpy $ MkCreatePixmap
+        { depth_CreatePixmap = depth
+        , pid_CreatePixmap = pixmap
+        , drawable_CreatePixmap = draw
+        , width_CreatePixmap = w
+        , height_CreatePixmap = h
+        }
+
+    picture <- newResource dpy
+    createPicture dpy $ MkCreatePicture
+        { pid_CreatePicture = picture
+        , drawable_CreatePicture = toDrawable pixmap
+        , format_CreatePicture = format
+        , value_CreatePicture = toValueParam
+            [(CPRepeat, toValue RepeatNormal)]
+        }
+
+    freePixmap dpy pixmap
+    return picture
