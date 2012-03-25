@@ -4,6 +4,7 @@ import Control.Applicative ( (<$>) )
 import Control.Concurrent ( forkIO )
 import Control.Monad ( forever, sequence_, unless, void )
 import Data.Bits ( shiftL )
+import Data.Int ( Int16 )
 import Data.Maybe ( isJust )
 import Data.Word ( Word8, Word16, Word32 )
 import Graphics.XHB
@@ -174,20 +175,10 @@ paint dpy = do
                          , toValue SubwindowModeIncludeInferiors
                          )]
                     }
-                composite dpy $! MkComposite
-                    { op_Composite = PictOpOver
-                    , src_Composite = pict
-                    , mask_Composite = mask
-                    , dst_Composite = buffer
-                    , src_x_Composite = 0
-                    , src_y_Composite = 0
-                    , mask_x_Composite = 0
-                    , mask_y_Composite = 0
-                    , dst_x_Composite = x_GetGeometryReply geom
-                    , dst_y_Composite = y_GetGeometryReply geom
-                    , width_Composite = w + b + b
-                    , height_Composite = h + b + b
-                    }
+                simpleComposite
+                    dpy PictOpOver pict (Just mask) buffer
+                    (x_GetGeometryReply geom, y_GetGeometryReply geom)
+                    (w + b + b, h + b + b)
                 freePicture dpy pict
 
         mRootPixmap <- getRootPixmap dpy root
@@ -201,40 +192,41 @@ paint dpy = do
                     , format_CreatePicture = rootFormat
                     , value_CreatePicture = emptyValueParam
                     }
-                composite dpy $! MkComposite
-                    { op_Composite = PictOpSrc
-                    , src_Composite = rootPicture
-                    , mask_Composite = fromXid xidNone
-                    , dst_Composite = buffer
-                    , src_x_Composite = 0
-                    , src_y_Composite = 0
-                    , mask_x_Composite = 0
-                    , mask_y_Composite = 0
-                    , dst_x_Composite = 0
-                    , dst_y_Composite = 0
-                    , width_Composite = rootW
-                    , height_Composite = rootH
-                    }
+                simpleComposite dpy PictOpSrc rootPicture Nothing
+                                buffer (0, 0) (rootW, rootH)
                 freePicture dpy rootPicture
 
         mapM_ draw childrenWithAttrs
 
-        composite dpy $! MkComposite
-            { op_Composite = PictOpOver
-            , src_Composite = buffer
-            , mask_Composite = fromXid xidNone
-            , dst_Composite = overlayPicture
-            , src_x_Composite = 0
-            , src_y_Composite = 0
-            , mask_x_Composite = 0
-            , mask_y_Composite = 0
-            , dst_x_Composite = 0
-            , dst_y_Composite = 0
-            , width_Composite = rootW
-            , height_Composite = rootH
-            }
+        simpleComposite dpy PictOpOver buffer Nothing
+                        overlayPicture (0, 0) (rootW, rootH)
 
         freePicture dpy buffer
+
+simpleComposite
+    :: Connection
+    -> PictOp           -- operation
+    -> PICTURE          -- source
+    -> Maybe PICTURE    -- mask
+    -> PICTURE          -- destination
+    -> (Int16, Int16)   -- (x, y)
+    -> (Word16, Word16) -- (width, height)
+    -> IO ()
+simpleComposite dpy op src mask dest (x, y) (w, h) =
+    composite dpy $! MkComposite
+        { op_Composite = op
+        , src_Composite = src
+        , mask_Composite = maybe (fromXid xidNone) id mask
+        , dst_Composite = dest
+        , src_x_Composite = 0
+        , src_y_Composite = 0
+        , mask_x_Composite = 0
+        , mask_y_Composite = 0
+        , dst_x_Composite = x
+        , dst_y_Composite = y
+        , width_Composite = w
+        , height_Composite = h
+        }
 
 class XidLike d => Drawable d where
     toDrawable :: d -> DRAWABLE
