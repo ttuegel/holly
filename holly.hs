@@ -190,29 +190,32 @@ paint dpy = do
                     }
                 freePicture dpy pict
 
-        rootPixmap <- getRootPixmap dpy root
-        rootPicture <- newResource dpy
-        createPicture dpy $! MkCreatePicture
-            { pid_CreatePicture = rootPicture
-            , drawable_CreatePicture = toDrawable rootPixmap
-            , format_CreatePicture = rootFormat
-            , value_CreatePicture = emptyValueParam
-            }
-        composite dpy $! MkComposite
-            { op_Composite = PictOpSrc
-            , src_Composite = rootPicture
-            , mask_Composite = fromXid xidNone
-            , dst_Composite = buffer
-            , src_x_Composite = 0
-            , src_y_Composite = 0
-            , mask_x_Composite = 0
-            , mask_y_Composite = 0
-            , dst_x_Composite = 0
-            , dst_y_Composite = 0
-            , width_Composite = rootW
-            , height_Composite = rootH
-            }
-        freePicture dpy rootPicture
+        mRootPixmap <- getRootPixmap dpy root
+        case mRootPixmap of
+            Nothing -> return ()
+            Just rootPixmap -> do
+                rootPicture <- newResource dpy
+                createPicture dpy $! MkCreatePicture
+                    { pid_CreatePicture = rootPicture
+                    , drawable_CreatePicture = toDrawable rootPixmap
+                    , format_CreatePicture = rootFormat
+                    , value_CreatePicture = emptyValueParam
+                    }
+                composite dpy $! MkComposite
+                    { op_Composite = PictOpSrc
+                    , src_Composite = rootPicture
+                    , mask_Composite = fromXid xidNone
+                    , dst_Composite = buffer
+                    , src_x_Composite = 0
+                    , src_y_Composite = 0
+                    , mask_x_Composite = 0
+                    , mask_y_Composite = 0
+                    , dst_x_Composite = 0
+                    , dst_y_Composite = 0
+                    , width_Composite = rootW
+                    , height_Composite = rootH
+                    }
+                freePicture dpy rootPicture
 
         mapM_ draw childrenWithAttrs
 
@@ -304,27 +307,27 @@ instance Eq PictType where
 instance Eq WindowClass where
     a == b = toValue a == toValue b
 
+getAtom :: Connection -> String -> Bool -> IO ATOM
+getAtom dpy name onlyIfExists =
+    (internAtom dpy $! MkInternAtom
+        { only_if_exists_InternAtom = onlyIfExists
+        , name_len_InternAtom = fromIntegral $! length cname
+        , name_InternAtom = cname
+        }
+    ) >>= getReply'
+  where
+    cname = stringToCList name
+
 getWindowOpacity :: Connection -> WINDOW -> IO Double
 getWindowOpacity dpy win = do
-    let cardinalName = stringToCList "CARDINAL"
-        opacityName = stringToCList "_NET_WM_WINDOW_OPACITY"
-    cardinal <- (internAtom dpy $ MkInternAtom
-        { only_if_exists_InternAtom = True
-        , name_len_InternAtom = fromIntegral $ length cardinalName
-        , name_InternAtom = cardinalName
-        }) >>= getReply'
-    opacityAtom <- (internAtom dpy $ MkInternAtom
-        { only_if_exists_InternAtom = False
-        , name_len_InternAtom = fromIntegral $ length opacityName
-        , name_InternAtom = opacityName
-        }) >>= getReply'
-    
+    cardinalAtom <- getAtom dpy "CARDINAL" True
+    opacityAtom <- getAtom dpy "_NET_WM_WINDOW_OPACITY" False
 
     val <- value_GetPropertyReply <$> ((getProperty dpy $ MkGetProperty
         { delete_GetProperty = False
         , window_GetProperty = win
         , property_GetProperty = opacityAtom
-        , type_GetProperty = cardinal
+        , type_GetProperty = cardinalAtom
         , long_offset_GetProperty = 0
         , long_length_GetProperty = 1
         }) >>= getReply')
@@ -354,28 +357,17 @@ createBuffer dpy draw (w, h) depth format = do
     freePixmap dpy pixmap
     return picture
 
-getRootPixmap :: Connection -> WINDOW -> IO PIXMAP
+getRootPixmap :: Connection -> WINDOW -> IO (Maybe PIXMAP)
 getRootPixmap dpy root = do
-    let rootPixmapName = stringToCList "_XROOTPMAP_ID"
-    rootPixmapAtom <- (internAtom dpy $! MkInternAtom
-        { only_if_exists_InternAtom = True
-        , name_len_InternAtom = fromIntegral $! length rootPixmapName
-        , name_InternAtom = rootPixmapName
-        }) >>= getReply'
-
-    let pixmapTypeName = stringToCList "PIXMAP"
-    pixmapTypeAtom <- (internAtom dpy $! MkInternAtom
-        { only_if_exists_InternAtom = True
-        , name_len_InternAtom = fromIntegral $! length pixmapTypeName
-        , name_InternAtom = pixmapTypeName
-        }) >>= getReply'
+    rootPixmapAtom <- getAtom dpy "_XROOTPMAP_ID" False
+    pixmapAtom <- getAtom dpy "PIXMAP" True
 
     pixmapIdBytes <- value_GetPropertyReply
         <$> ((getProperty dpy $! MkGetProperty
             { delete_GetProperty = False
             , window_GetProperty = root
             , property_GetProperty = rootPixmapAtom
-            , type_GetProperty = pixmapTypeAtom
+            , type_GetProperty = pixmapAtom
             , long_offset_GetProperty = 0
             , long_length_GetProperty = 4
             }) >>= getReply')
@@ -383,4 +375,6 @@ getRootPixmap dpy root = do
         pixmapIdWords = zipWith shiftL (map fromIntegral pixmapIdBytes) shifts
         pixmapId :: Word32
         pixmapId = sum pixmapIdWords
-    return $! fromXid $! toXid pixmapId
+    return $! if null pixmapIdBytes
+        then Nothing
+        else Just $! fromXid $! toXid pixmapId
