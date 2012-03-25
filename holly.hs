@@ -3,8 +3,9 @@ module Main where
 import Control.Applicative ( (<$>) )
 import Control.Concurrent ( forkIO )
 import Control.Monad ( forever, sequence_, unless, void )
+import Data.Bits ( shiftL )
 import Data.Maybe ( isJust )
-import Data.Word ( Word8, Word16 )
+import Data.Word ( Word8, Word16, Word32 )
 import Graphics.XHB
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension, queryVersion, QueryVersionReply(..) )
@@ -174,7 +175,7 @@ paint dpy = do
                          )]
                     }
                 composite dpy $! MkComposite
-                    { op_Composite = PictOpSrc
+                    { op_Composite = PictOpOver
                     , src_Composite = pict
                     , mask_Composite = mask
                     , dst_Composite = buffer
@@ -188,10 +189,35 @@ paint dpy = do
                     , height_Composite = h + b + b
                     }
                 freePicture dpy pict
+
+        rootPixmap <- getRootPixmap dpy root
+        rootPicture <- newResource dpy
+        createPicture dpy $! MkCreatePicture
+            { pid_CreatePicture = rootPicture
+            , drawable_CreatePicture = toDrawable rootPixmap
+            , format_CreatePicture = rootFormat
+            , value_CreatePicture = emptyValueParam
+            }
+        composite dpy $! MkComposite
+            { op_Composite = PictOpSrc
+            , src_Composite = rootPicture
+            , mask_Composite = fromXid xidNone
+            , dst_Composite = buffer
+            , src_x_Composite = 0
+            , src_y_Composite = 0
+            , mask_x_Composite = 0
+            , mask_y_Composite = 0
+            , dst_x_Composite = 0
+            , dst_y_Composite = 0
+            , width_Composite = rootW
+            , height_Composite = rootH
+            }
+        freePicture dpy rootPicture
+
         mapM_ draw childrenWithAttrs
 
         composite dpy $! MkComposite
-            { op_Composite = PictOpSrc
+            { op_Composite = PictOpOver
             , src_Composite = buffer
             , mask_Composite = fromXid xidNone
             , dst_Composite = overlayPicture
@@ -327,3 +353,34 @@ createBuffer dpy draw (w, h) depth format = do
 
     freePixmap dpy pixmap
     return picture
+
+getRootPixmap :: Connection -> WINDOW -> IO PIXMAP
+getRootPixmap dpy root = do
+    let rootPixmapName = stringToCList "_XROOTPMAP_ID"
+    rootPixmapAtom <- (internAtom dpy $! MkInternAtom
+        { only_if_exists_InternAtom = True
+        , name_len_InternAtom = fromIntegral $! length rootPixmapName
+        , name_InternAtom = rootPixmapName
+        }) >>= getReply'
+
+    let pixmapTypeName = stringToCList "PIXMAP"
+    pixmapTypeAtom <- (internAtom dpy $! MkInternAtom
+        { only_if_exists_InternAtom = True
+        , name_len_InternAtom = fromIntegral $! length pixmapTypeName
+        , name_InternAtom = pixmapTypeName
+        }) >>= getReply'
+
+    pixmapIdBytes <- value_GetPropertyReply
+        <$> ((getProperty dpy $! MkGetProperty
+            { delete_GetProperty = False
+            , window_GetProperty = root
+            , property_GetProperty = rootPixmapAtom
+            , type_GetProperty = pixmapTypeAtom
+            , long_offset_GetProperty = 0
+            , long_length_GetProperty = 4
+            }) >>= getReply')
+    let shifts = map (* 8) [0..3]
+        pixmapIdWords = zipWith shiftL (map fromIntegral pixmapIdBytes) shifts
+        pixmapId :: Word32
+        pixmapId = sum pixmapIdWords
+    return $! fromXid $! toXid pixmapId
