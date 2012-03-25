@@ -306,7 +306,7 @@ instance Eq WindowClass where
 
 getWindowOpacity :: Connection -> WINDOW -> IO Double
 getWindowOpacity dpy win = do
-    let cardinalName = stringToCList "XA_CARDINAL"
+    let cardinalName = stringToCList "CARDINAL"
         opacityName = stringToCList "_NET_WM_WINDOW_OPACITY"
     cardinal <- (internAtom dpy $ MkInternAtom
         { only_if_exists_InternAtom = True
