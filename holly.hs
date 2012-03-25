@@ -14,6 +14,12 @@ import Graphics.XHB.Connection.Open
 import qualified Graphics.XHB.Gen.Render as Render
     ( extension, queryVersion, QueryVersionReply(..) )
 import Graphics.XHB.Gen.Render
+import qualified Graphics.XHB.Gen.Shape as Shape
+    ( extension, queryVersion, QueryVersionReply(..) )
+import Graphics.XHB.Gen.Shape
+import qualified Graphics.XHB.Gen.XFixes as XFixes
+    ( extension, queryVersion, QueryVersionReply(..) )
+import Graphics.XHB.Gen.XFixes
 
 main :: IO ()
 main = do
@@ -50,6 +56,24 @@ checkExtensions dpy = do
     unless renderVersionOk
         $ error "Render extension version >= 0.11 required!"
 
+    fixesPresent <- extensionPresent dpy XFixes.extension
+    unless fixesPresent $ error "XFixes extension required!"
+    fixesVersion <- XFixes.queryVersion dpy 2 0 >>= getReply'
+    let fixesVersionOk =
+            XFixes.major_version_QueryVersionReply fixesVersion >= 2
+    unless fixesVersionOk
+        $ error "XFixes extension version >= 2 required!"
+            
+    shapePresent <- extensionPresent dpy Shape.extension
+    unless shapePresent $ error "Shape extension required!"
+    shapeVersion <- Shape.queryVersion dpy >>= getReply'
+    let shapeVersionOk =
+            (   Shape.major_version_QueryVersionReply shapeVersion == 1
+             && Shape.minor_version_QueryVersionReply shapeVersion >= 1
+            ) || Shape.major_version_QueryVersionReply shapeVersion > 1
+    unless shapeVersionOk
+        $ error "Shape extension version >= 1 required!"
+
 errorHandler :: Connection -> IO ()
 errorHandler dpy = do
     void $ forkIO $ forever $ do
@@ -60,7 +84,14 @@ eventHandler :: Connection -> IO ()
 eventHandler dpy = do
     void $ forkIO $ forever $ do
         ev <- waitForEvent dpy
-        return ()
+        case fromEvent ev of
+            Nothing -> return ()
+            Just (MkButtonPressEvent {}) ->
+                putStrLn "Got a button press event, but I shouldn't be getting button press events!"
+  where
+    root = root_SCREEN scr
+    scr = (!! scrNum) $ roots_Setup $ connectionSetup dpy
+    scrNum = screen $ displayInfo dpy
 
 paint :: Connection -> IO ()
 paint dpy = do
@@ -87,6 +118,25 @@ paint dpy = do
              )]
         }
 
+    changeWindowAttributes dpy overlayWindow $! toValueParam
+        [(CWEventMask, toMask
+            [ EventMaskSubstructureNotify
+            , EventMaskExposure
+            , EventMaskStructureNotify
+            , EventMaskPropertyChange
+            ]
+         )]
+
+    rectangles dpy $! MkRectangles
+        { operation_Rectangles = SOSet
+        , destination_kind_Rectangles = SKInput
+        , ordering_Rectangles = ClipOrderingUnsorted
+        , destination_window_Rectangles = overlayWindow
+        , x_offset_Rectangles = 0
+        , y_offset_Rectangles = 0
+        , rectangles_Rectangles = []
+        }
+
     forever $ do
         bufferFormat <- findStandardFormat dpy True
         buffer <- createBuffer dpy (toDrawable overlayWindow) (rootW, rootH)
@@ -109,6 +159,8 @@ paint dpy = do
                 childFormat <- findVisualFormat dpy $! visual_GetWindowAttributesReply attrs
                 geom <- getGeometry dpy (toDrawable child) >>= getReply'
                 let b = border_width_GetGeometryReply geom
+                    w = width_GetGeometryReply geom
+                    h = height_GetGeometryReply geom
                 opacity <- getWindowOpacity dpy child
                 mask <- solidPicture dpy (toDrawable overlayWindow) opacity Nothing
                 pict <- newResource dpy
@@ -132,8 +184,8 @@ paint dpy = do
                     , mask_y_Composite = 0
                     , dst_x_Composite = x_GetGeometryReply geom
                     , dst_y_Composite = y_GetGeometryReply geom
-                    , width_Composite = width_GetGeometryReply geom + b + b
-                    , height_Composite = height_GetGeometryReply geom + b + b
+                    , width_Composite = w + b + b
+                    , height_Composite = h + b + b
                     }
                 freePicture dpy pict
         mapM_ draw childrenWithAttrs
