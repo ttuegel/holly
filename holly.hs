@@ -76,7 +76,6 @@ init dpy = do
         , x_offset_Rectangles = 0
         , y_offset_Rectangles = 0
         , rectangles_Rectangles = []
-
         }
 
     changeWindowAttributes dpy r $! toValueParam
