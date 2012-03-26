@@ -19,6 +19,7 @@ import qualified Graphics.XHB.Gen.Composite as Composite
 import Graphics.XHB.Gen.Composite
 import Graphics.XHB.Connection.Extension
 import Graphics.XHB.Connection.Open
+import qualified Graphics.XHB.Gen.Damage as Damage
 import qualified Graphics.XHB.Gen.Render as Render
     ( extension, queryVersion, QueryVersionReply(..) )
 import Graphics.XHB.Gen.Render
@@ -157,6 +158,10 @@ checkExtensions dpy = do
     unless shapeVersionOk
         $ error "Shape extension version >= 1 required!"
 
+    damagePresent <- extensionPresent dpy Damage.extension
+    unless damagePresent
+        $ error "Damage extension required!"
+
 eventHandler :: Connection -> HollyState -> IO ()
 eventHandler dpy state = do
     paint dpy state
@@ -227,6 +232,14 @@ getWindow dpy wid = do
     attrs <- getWindowAttributes dpy wid >>= getReply'
     opacity <- getWindowOpacity dpy wid
     fmt <- findVisualFormat dpy $ visual_GetWindowAttributesReply attrs
+    changeWindowAttributes dpy wid $! toValueParam
+        [(CWEventMask, toMask [ EventMaskPropertyChange ])]
+    dam <- newResource dpy
+    Damage.create dpy $! Damage.MkCreate
+        { Damage.damage_Create = dam
+        , Damage.drawable_Create = toDrawable wid
+        , Damage.level_Create = Damage.ReportLevelNonEmpty
+        }
     return $! Win
             { winX = x_GetGeometryReply geom
             , winY = y_GetGeometryReply geom
