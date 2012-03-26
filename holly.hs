@@ -8,7 +8,7 @@ import Data.Bits ( shiftL )
 import Data.Function ( on )
 import Data.Int ( Int16 )
 import Data.List ( find )
-import Data.Maybe ( isJust, mapMaybe )
+import Data.Maybe ( fromJust, isJust, mapMaybe )
 import Data.Sequence ( Seq )
 import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
@@ -165,14 +165,12 @@ eventHandler dpy state = do
     ev <- waitForEvent dpy
     let handler :: SomeEvent -> StateT (Seq Win) IO ()
         handler e = do
-            case mapMaybe (\f -> f e) handlers of
-                (go:_) -> go
-                [] -> return ()
+            mapM_ (\f -> f e) handlers
             mE <- liftIO $ pollForEvent dpy
             case mE of
                 Nothing -> return ()
                 Just e' -> handler e'
-        handlers :: [SomeEvent -> Maybe (StateT (Seq Win) IO ())]
+        handlers :: [SomeEvent -> StateT (Seq Win) IO ()]
         handlers =
             [ createNotifyHandler dpy
             , configureNotifyHandler dpy
@@ -186,36 +184,39 @@ eventHandler dpy state = do
     wins' <- execStateT (handler ev) $ wins state
     eventHandler dpy $! state { wins = wins' }
 
-createNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
-createNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \cEv -> do
-    win <- liftIO $ getWindow dpy $ window_CreateNotifyEvent cEv
+guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
+guarded f ev = let ev' = fromEvent ev in when (isJust ev') $ f $ fromJust ev'
+
+createNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+createNotifyHandler dpy = guarded $ \ev -> do
+    win <- liftIO $ getWindow dpy $ window_CreateNotifyEvent ev
     modify (S.|> win)
 
-configureNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
-configureNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \cEv -> do
-    let wid = window_ConfigureNotifyEvent cEv
+configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+configureNotifyHandler dpy = guarded $ \ev -> do
+    let wid = window_ConfigureNotifyEvent ev
     win <- liftIO $ getWindow dpy wid
     modify $ fmap $ \w -> if winId w == wid then win else w
 
-destroyNotifyHandler :: SomeEvent -> Maybe (StateT (Seq Win) IO ())
-destroyNotifyHandler ev = flip fmap (fromEvent ev) $ \dEv ->
-    let wid = window_DestroyNotifyEvent dEv
-    in modify $ S.filter $ (/= wid) . winId
+destroyNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
+destroyNotifyHandler = guarded $ \ev -> do
+    let wid = window_DestroyNotifyEvent ev
+    modify $ S.filter $ (/= wid) . winId
 
-unmapNotifyHandler :: SomeEvent -> Maybe (StateT (Seq Win) IO ())
-unmapNotifyHandler ev = flip fmap (fromEvent ev) $ \uEv ->
-    let wid = window_UnmapNotifyEvent uEv
-    in modify $ S.filter $ (/= wid) . winId
+unmapNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
+unmapNotifyHandler = guarded $ \ev -> do
+    let wid = window_UnmapNotifyEvent ev
+    modify $ S.filter $ (/= wid) . winId
 
-mapNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
-mapNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \mEv -> do
-    win <- liftIO $ getWindow dpy $ window_MapNotifyEvent mEv
+mapNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+mapNotifyHandler dpy = guarded $ \ev -> do
+    win <- liftIO $ getWindow dpy $ window_MapNotifyEvent ev
     modify (S.|> win)
 
-reparentNotifyHandler :: Connection -> WINDOW -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
-reparentNotifyHandler dpy rootWindow ev = flip fmap (fromEvent ev) $ \rEv ->
-    let wid = window_ReparentNotifyEvent rEv
-    in if parent_ReparentNotifyEvent rEv == rootWindow
+reparentNotifyHandler :: Connection -> WINDOW -> SomeEvent -> StateT (Seq Win) IO ()
+reparentNotifyHandler dpy rootWindow = guarded $ \ev -> do
+    let wid = window_ReparentNotifyEvent ev
+    if parent_ReparentNotifyEvent ev == rootWindow
         then do
             win <- liftIO $ getWindow dpy wid
             modify (S.|> win)
@@ -238,23 +239,23 @@ getWindow dpy wid = do
             , winOpacity = opacity
             }
 
-circulateNotifyHandler :: SomeEvent -> Maybe (StateT (Seq Win) IO ())
-circulateNotifyHandler ev = flip fmap (fromEvent ev) $ \cEv -> modify $ \ws ->
-    let wid = window_CirculateNotifyEvent cEv
+circulateNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
+circulateNotifyHandler = guarded $ \ev -> modify $ \ws -> do
+    let wid = window_CirculateNotifyEvent ev
         ws' = S.filter ((/= wid) . winId) ws
-    in case S.findIndexL ((== wid) . winId) ws of
+    case S.findIndexL ((== wid) . winId) ws of
         Nothing -> ws
         Just wIx ->
             let win = S.index ws wIx
-            in case place_CirculateNotifyEvent cEv of
+            in case place_CirculateNotifyEvent ev of
                 PlaceOnTop -> win S.<| ws'
                 PlaceOnBottom -> ws' S.|> win
 
-propertyNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
-propertyNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \pEv -> do
-    let wid = window_PropertyNotifyEvent pEv
+propertyNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+propertyNotifyHandler dpy = guarded $ \ev -> do
+    let wid = window_PropertyNotifyEvent ev
     opacityAtom <- liftIO $ getAtom dpy "_NET_WM_WINDOW_OPACITY" False
-    if atom_PropertyNotifyEvent pEv == opacityAtom
+    if atom_PropertyNotifyEvent ev == opacityAtom
         then do
             newOpacity <- liftIO $ getWindowOpacity dpy wid
             modify $ fmap $ \w ->
