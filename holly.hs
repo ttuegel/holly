@@ -1,11 +1,17 @@
 module Main where
 
 import Control.Applicative ( (<$>) )
-import Control.Concurrent ( forkIO )
+import Control.Concurrent ( forkIO, yield )
 import Control.Monad ( forever, sequence_, unless, void )
+import Control.Monad.State hiding ( mapM )
 import Data.Bits ( shiftL )
+import Data.Function ( on )
 import Data.Int ( Int16 )
-import Data.Maybe ( isJust )
+import Data.List ( find )
+import Data.Maybe ( isJust, mapMaybe )
+import Data.Sequence ( Seq )
+import Data.Traversable ( mapM )
+import qualified Data.Sequence as S
 import Data.Word ( Word8, Word16, Word32 )
 import Graphics.XHB
 import qualified Graphics.XHB.Gen.Composite as Composite
@@ -18,18 +24,94 @@ import qualified Graphics.XHB.Gen.Render as Render
 import Graphics.XHB.Gen.Render
 import qualified Graphics.XHB.Gen.Shape as Shape
     ( extension, queryVersion, QueryVersionReply(..) )
-import Graphics.XHB.Gen.Shape
+import Graphics.XHB.Gen.Shape hiding ( mask )
 import qualified Graphics.XHB.Gen.XFixes as XFixes
     ( extension, queryVersion, QueryVersionReply(..) )
 import Graphics.XHB.Gen.XFixes
+import Prelude hiding ( init, mapM )
 
 main :: IO ()
 main = do
     dpy <- maybe (error "Could not open display!") id <$> connect
     checkExtensions dpy
-    errorHandler dpy
-    eventHandler dpy
-    paint dpy
+    init dpy >>= eventHandler dpy
+
+data HollyState = HollyState
+    { wins  :: Seq Win
+    , root  :: WINDOW
+    , scr   :: SCREEN
+    , rootW :: Word16
+    , rootH :: Word16
+    , rootFormat :: PICTFORMAT
+    , overlayPicture :: PICTURE
+    , overlayWindow :: WINDOW
+    }
+
+init :: Connection -> IO HollyState
+init dpy = do
+    let scrNum = screen $ displayInfo dpy
+        s = (!! scrNum) $ roots_Setup $ connectionSetup dpy
+        r = root_SCREEN s
+    geom <- getGeometry dpy (toDrawable r) >>= getReply'
+    redirectSubwindows dpy r RedirectManual
+    let rootVisual = root_visual_SCREEN s
+    rootF <- findVisualFormat dpy rootVisual
+
+    overlayW <- getOverlayWindow dpy r >>= getReply'
+    overlayP <- newResource dpy
+    createPicture dpy $! MkCreatePicture
+        { pid_CreatePicture = overlayP
+        , drawable_CreatePicture = toDrawable overlayW
+        , format_CreatePicture = rootF
+        , value_CreatePicture = toValueParam
+            [( CPSubwindowMode
+             , toValue SubwindowModeIncludeInferiors
+             )]
+        }
+    rectangles dpy $! MkRectangles
+        { operation_Rectangles = SOSet
+        , destination_kind_Rectangles = SKInput
+        , ordering_Rectangles = ClipOrderingUnsorted
+        , destination_window_Rectangles = overlayW
+        , x_offset_Rectangles = 0
+        , y_offset_Rectangles = 0
+        , rectangles_Rectangles = []
+
+        }
+
+    changeWindowAttributes dpy r $! toValueParam
+        [(CWEventMask, toMask
+            [ EventMaskSubstructureNotify
+            , EventMaskExposure
+            , EventMaskStructureNotify
+            , EventMaskPropertyChange
+            ]
+         )]
+    selectInput dpy r True
+
+    children <- children_QueryTreeReply
+        <$> (queryTree dpy r >>= getReply')
+    childrenAttrs <- mapM ((>>= getReply') . getWindowAttributes dpy) children
+    let childrenWithAttrs = filter viewable . filter (not . inputOnly)
+            $ zip children childrenAttrs
+        viewable =   (== MapStateViewable)
+                   . map_state_GetWindowAttributesReply
+                   . snd
+        inputOnly =   (== WindowClassInputOnly)
+                   . class_GetWindowAttributesReply
+                   . snd
+    ws <- mapM (getWindow dpy) $ map fst childrenWithAttrs
+
+    return $! HollyState
+        { wins = S.fromList $! ws
+        , scr = s
+        , root = r
+        , rootW = width_GetGeometryReply geom
+        , rootH = height_GetGeometryReply geom
+        , rootFormat = rootF
+        , overlayPicture = overlayP
+        , overlayWindow = overlayW
+        }
 
 getReply' :: Receipt a -> IO a
 getReply' rcpt = do
@@ -76,132 +158,159 @@ checkExtensions dpy = do
     unless shapeVersionOk
         $ error "Shape extension version >= 1 required!"
 
-errorHandler :: Connection -> IO ()
-errorHandler dpy = do
-    void $ forkIO $ forever $ do
-        err <- waitForError dpy
-        putStrLn $ show err
-
-eventHandler :: Connection -> IO ()
-eventHandler dpy = do
-    void $ forkIO $ forever $ do
-        ev <- waitForEvent dpy
-        case fromEvent ev of
-            Nothing -> return ()
-            Just (MkButtonPressEvent {}) ->
-                putStrLn "Got a button press event, but I shouldn't be getting button press events!"
-  where
-    root = root_SCREEN scr
-    scr = (!! scrNum) $ roots_Setup $ connectionSetup dpy
-    scrNum = screen $ displayInfo dpy
-
-paint :: Connection -> IO ()
-paint dpy = do
-    let scrNum = screen $ displayInfo dpy
-        scr = (!! scrNum) $ roots_Setup $ connectionSetup dpy
-        root = root_SCREEN scr
-    geom <- getGeometry dpy (toDrawable root) >>= getReply'
-    let rootW = width_GetGeometryReply geom
-        rootH = height_GetGeometryReply geom
-    redirectSubwindows dpy root RedirectManual
-
-    let rootVisual = root_visual_SCREEN scr
-    rootFormat <- findVisualFormat dpy rootVisual
-
-    overlayWindow <- getOverlayWindow dpy root >>= getReply'
-    overlayPicture <- newResource dpy
-    createPicture dpy $! MkCreatePicture
-        { pid_CreatePicture = overlayPicture
-        , drawable_CreatePicture = toDrawable overlayWindow
-        , format_CreatePicture = rootFormat
-        , value_CreatePicture = toValueParam
-            [( CPSubwindowMode
-             , toValue SubwindowModeIncludeInferiors
-             )]
-        }
-
-    changeWindowAttributes dpy overlayWindow $! toValueParam
-        [(CWEventMask, toMask
-            [ EventMaskSubstructureNotify
-            , EventMaskExposure
-            , EventMaskStructureNotify
-            , EventMaskPropertyChange
+eventHandler :: Connection -> HollyState -> IO ()
+eventHandler dpy state = do
+    paint dpy state
+    yield
+    ev <- waitForEvent dpy
+    let handler :: SomeEvent -> StateT (Seq Win) IO ()
+        handler e = do
+            case mapMaybe (\f -> f e) handlers of
+                (go:_) -> go
+                [] -> return ()
+            mE <- liftIO $ pollForEvent dpy
+            case mE of
+                Nothing -> return ()
+                Just e' -> handler e'
+        handlers :: [SomeEvent -> Maybe (StateT (Seq Win) IO ())]
+        handlers =
+            [ createNotifyHandler dpy
+            , configureNotifyHandler dpy
+            , destroyNotifyHandler
+            , mapNotifyHandler dpy
+            , unmapNotifyHandler
+            , reparentNotifyHandler dpy $ root state
+            , circulateNotifyHandler
+            , propertyNotifyHandler dpy
             ]
-         )]
+    wins' <- execStateT (handler ev) $ wins state
+    eventHandler dpy $! state { wins = wins' }
 
-    rectangles dpy $! MkRectangles
-        { operation_Rectangles = SOSet
-        , destination_kind_Rectangles = SKInput
-        , ordering_Rectangles = ClipOrderingUnsorted
-        , destination_window_Rectangles = overlayWindow
-        , x_offset_Rectangles = 0
-        , y_offset_Rectangles = 0
-        , rectangles_Rectangles = []
-        }
+createNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
+createNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \cEv -> do
+    win <- liftIO $ getWindow dpy $ window_CreateNotifyEvent cEv
+    modify (S.|> win)
 
-    forever $ do
-        bufferFormat <- findStandardFormat dpy True
-        buffer <- createBuffer dpy (toDrawable overlayWindow) (rootW, rootH)
-                  32 bufferFormat
+configureNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
+configureNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \cEv -> do
+    let wid = window_ConfigureNotifyEvent cEv
+    win <- liftIO $ getWindow dpy wid
+    modify $ fmap $ \w -> if winId w == wid then win else w
 
-        children <- children_QueryTreeReply
-            <$> (queryTree dpy root >>= getReply')
-        childrenAttrs <- mapM (getWindowAttributes dpy) children >>= mapM getReply'
-        let childrenWithAttrs = filter viewable . filter (not . inputOnly)
-                $ zip children childrenAttrs
-            viewable =   (== MapStateViewable)
-                       . map_state_GetWindowAttributesReply
-                       . snd
-            inputOnly =   (== WindowClassInputOnly)
-                       . class_GetWindowAttributesReply
-                       . snd
-            draw (child, attrs) = do
-                pixm <- newResource dpy
-                nameWindowPixmap dpy child pixm
-                childFormat <- findVisualFormat dpy $! visual_GetWindowAttributesReply attrs
-                geom <- getGeometry dpy (toDrawable child) >>= getReply'
-                let b = border_width_GetGeometryReply geom
-                    w = width_GetGeometryReply geom
-                    h = height_GetGeometryReply geom
-                opacity <- getWindowOpacity dpy child
-                mask <- solidPicture dpy (toDrawable overlayWindow) opacity Nothing
-                pict <- newResource dpy
-                createPicture dpy $ MkCreatePicture
-                    { pid_CreatePicture = pict
-                    , drawable_CreatePicture = toDrawable pixm
-                    , format_CreatePicture = childFormat
-                    , value_CreatePicture = toValueParam
-                        [( CPSubwindowMode
-                         , toValue SubwindowModeIncludeInferiors
-                         )]
-                    }
-                simpleComposite
-                    dpy PictOpOver pict (Just mask) buffer
-                    (x_GetGeometryReply geom, y_GetGeometryReply geom)
-                    (w + b + b, h + b + b)
-                freePicture dpy pict
+destroyNotifyHandler :: SomeEvent -> Maybe (StateT (Seq Win) IO ())
+destroyNotifyHandler ev = flip fmap (fromEvent ev) $ \dEv ->
+    let wid = window_DestroyNotifyEvent dEv
+    in modify $ S.filter $ (/= wid) . winId
 
-        mRootPixmap <- getRootPixmap dpy root
-        case mRootPixmap of
-            Nothing -> return ()
-            Just rootPixmap -> do
-                rootPicture <- newResource dpy
-                createPicture dpy $! MkCreatePicture
-                    { pid_CreatePicture = rootPicture
-                    , drawable_CreatePicture = toDrawable rootPixmap
-                    , format_CreatePicture = rootFormat
-                    , value_CreatePicture = emptyValueParam
-                    }
-                simpleComposite dpy PictOpSrc rootPicture Nothing
-                                buffer (0, 0) (rootW, rootH)
-                freePicture dpy rootPicture
+unmapNotifyHandler :: SomeEvent -> Maybe (StateT (Seq Win) IO ())
+unmapNotifyHandler ev = flip fmap (fromEvent ev) $ \uEv ->
+    let wid = window_UnmapNotifyEvent uEv
+    in modify $ S.filter $ (/= wid) . winId
 
-        mapM_ draw childrenWithAttrs
+mapNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
+mapNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \mEv -> do
+    win <- liftIO $ getWindow dpy $ window_MapNotifyEvent mEv
+    modify (S.|> win)
 
-        simpleComposite dpy PictOpOver buffer Nothing
-                        overlayPicture (0, 0) (rootW, rootH)
+reparentNotifyHandler :: Connection -> WINDOW -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
+reparentNotifyHandler dpy rootWindow ev = flip fmap (fromEvent ev) $ \rEv ->
+    let wid = window_ReparentNotifyEvent rEv
+    in if parent_ReparentNotifyEvent rEv == rootWindow
+        then do
+            win <- liftIO $ getWindow dpy wid
+            modify (S.|> win)
+        else modify $ S.filter $ (/= wid) . winId
 
-        freePicture dpy buffer
+getWindow :: Connection -> WINDOW -> IO Win
+getWindow dpy wid = do
+    geom <- getGeometry dpy (toDrawable wid) >>= getReply'
+    attrs <- getWindowAttributes dpy wid >>= getReply'
+    opacity <- getWindowOpacity dpy wid
+    fmt <- findVisualFormat dpy $ visual_GetWindowAttributesReply attrs
+    return $! Win
+            { winX = x_GetGeometryReply geom
+            , winY = y_GetGeometryReply geom
+            , winW = width_GetGeometryReply geom
+            , winH = height_GetGeometryReply geom
+            , winB = border_width_GetGeometryReply geom
+            , winId = wid
+            , winFormat = fmt
+            , winOpacity = opacity
+            }
+
+circulateNotifyHandler :: SomeEvent -> Maybe (StateT (Seq Win) IO ())
+circulateNotifyHandler ev = flip fmap (fromEvent ev) $ \cEv -> modify $ \ws ->
+    let wid = window_CirculateNotifyEvent cEv
+        ws' = S.filter ((/= wid) . winId) ws
+    in case S.findIndexL ((== wid) . winId) ws of
+        Nothing -> ws
+        Just wIx ->
+            let win = S.index ws wIx
+            in case place_CirculateNotifyEvent cEv of
+                PlaceOnTop -> win S.<| ws'
+                PlaceOnBottom -> ws' S.|> win
+
+propertyNotifyHandler :: Connection -> SomeEvent -> Maybe (StateT (Seq Win) IO ())
+propertyNotifyHandler dpy ev = flip fmap (fromEvent ev) $ \pEv -> do
+    let wid = window_PropertyNotifyEvent pEv
+    opacityAtom <- liftIO $ getAtom dpy "_NET_WM_WINDOW_OPACITY" False
+    if atom_PropertyNotifyEvent pEv == opacityAtom
+        then do
+            newOpacity <- liftIO $ getWindowOpacity dpy wid
+            modify $ fmap $ \w ->
+                if winId w == wid then w { winOpacity = newOpacity } else w
+        else return ()
+
+paint :: Connection -> HollyState -> IO ()
+paint dpy holly = do
+    bufferFormat <- findStandardFormat dpy True
+    buffer <- createBuffer dpy
+        (toDrawable $! overlayWindow holly)
+        (rootW holly, rootH holly)
+        32 bufferFormat
+
+    let draw win = do
+            pixm <- newResource dpy
+            nameWindowPixmap dpy (winId win) pixm
+            mask <- solidPicture dpy (toDrawable $ overlayWindow holly)
+                (winOpacity win) Nothing
+            pict <- newResource dpy
+            createPicture dpy $ MkCreatePicture
+                { pid_CreatePicture = pict
+                , drawable_CreatePicture = toDrawable pixm
+                , format_CreatePicture = winFormat win
+                , value_CreatePicture = toValueParam
+                    [( CPSubwindowMode
+                     , toValue SubwindowModeIncludeInferiors
+                     )]
+                }
+            simpleComposite
+                dpy PictOpOver pict (Just mask) buffer
+                (winX win, winY win)
+                (winW win + winB win + winB win, winH win + winB win + winB win)
+            freePicture dpy pict
+
+    mRootPixmap <- getRootPixmap dpy $ root holly
+    case mRootPixmap of
+        Nothing -> return ()
+        Just rootPixmap -> do
+            rootPicture <- newResource dpy
+            createPicture dpy $! MkCreatePicture
+                { pid_CreatePicture = rootPicture
+                , drawable_CreatePicture = toDrawable rootPixmap
+                , format_CreatePicture = rootFormat holly
+                , value_CreatePicture = emptyValueParam
+                }
+            simpleComposite dpy PictOpSrc rootPicture Nothing
+                            buffer (0, 0) (rootW holly, rootH holly)
+            freePicture dpy rootPicture
+
+    mapM draw $ wins holly
+
+    simpleComposite dpy PictOpOver buffer Nothing
+                    (overlayPicture holly) (0, 0) (rootW holly, rootH holly)
+
+    freePicture dpy buffer
 
 simpleComposite
     :: Connection
@@ -350,14 +459,14 @@ createBuffer dpy draw (w, h) depth format = do
     return picture
 
 getRootPixmap :: Connection -> WINDOW -> IO (Maybe PIXMAP)
-getRootPixmap dpy root = do
+getRootPixmap dpy rootWindow = do
     rootPixmapAtom <- getAtom dpy "_XROOTPMAP_ID" False
     pixmapAtom <- getAtom dpy "PIXMAP" True
 
     pixmapIdBytes <- value_GetPropertyReply
         <$> ((getProperty dpy $! MkGetProperty
             { delete_GetProperty = False
-            , window_GetProperty = root
+            , window_GetProperty = rootWindow
             , property_GetProperty = rootPixmapAtom
             , type_GetProperty = pixmapAtom
             , long_offset_GetProperty = 0
@@ -370,3 +479,15 @@ getRootPixmap dpy root = do
     return $! if null pixmapIdBytes
         then Nothing
         else Just $! fromXid $! toXid pixmapId
+
+data Win = Win
+    { winId :: WINDOW
+    , winX  :: Int16
+    , winY  :: Int16
+    , winW  :: Word16
+    , winH  :: Word16
+    , winB  :: Word16
+    , winFormat :: PICTFORMAT
+    , winOpacity :: Double
+    }
+  deriving (Eq, Show)

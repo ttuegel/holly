@@ -17,5 +17,8 @@ cabal-version:       >=1.8
 executable holly
   main-is:             holly.hs
   -- other-modules:       
+  ghc-options:         -Wall
   build-depends:       base,
+                       containers == 0.4.*,
+                       mtl == 2.0.*,
                        xhb
