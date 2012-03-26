@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 module Main where
 
 import Control.Applicative ( (<$>) )
@@ -35,7 +36,11 @@ main :: IO ()
 main = do
     dpy <- maybe (error "Could not open display!") id <$> connect
     checkExtensions dpy
-    init dpy >>= eventHandler dpy
+    init dpy >>= evalStateT (eventHandler dpy)
+    keepAlive dpy
+
+keepAlive :: Connection -> IO ()
+keepAlive !dpy = return ()
 
 data HollyState = HollyState
     { wins  :: Seq Win
@@ -162,20 +167,12 @@ checkExtensions dpy = do
     unless damagePresent
         $ error "Damage extension required!"
 
-eventHandler :: Connection -> HollyState -> IO ()
-eventHandler dpy state = do
-    paint dpy state
-    yield
-    ev <- waitForEvent dpy
-    let handler :: SomeEvent -> StateT (Seq Win) IO ()
-        handler e = do
-            mapM_ (\f -> f e) handlers
-            mE <- liftIO $ pollForEvent dpy
-            case mE of
-                Nothing -> return ()
-                Just e' -> handler e'
-        handlers :: [SomeEvent -> StateT (Seq Win) IO ()]
-        handlers =
+eventHandler :: Connection -> StateT HollyState IO ()
+eventHandler dpy = forever $ do
+    state <- get
+    liftIO $ paint dpy state
+    ev <- liftIO $ waitForEvent dpy
+    let handlers =
             [ createNotifyHandler dpy
             , configureNotifyHandler dpy
             , destroyNotifyHandler
@@ -185,8 +182,14 @@ eventHandler dpy state = do
             , circulateNotifyHandler
             , propertyNotifyHandler dpy
             ]
-    wins' <- execStateT (handler ev) $ wins state
-    eventHandler dpy $! state { wins = wins' }
+        handler e = do
+            mapM_ (\f -> f e) handlers
+            mE <- liftIO $ pollForEvent dpy
+            case mE of
+                Nothing -> return ()
+                Just e' -> handler e'
+    wins' <- liftIO $ execStateT (handler ev) $ wins state
+    modify $ \s -> s { wins = wins' }
 
 guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
 guarded f ev = let ev' = fromEvent ev in when (isJust ev') $ f $ fromJust ev'
