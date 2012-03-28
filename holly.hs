@@ -1,15 +1,14 @@
 {-# LANGUAGE BangPatterns #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Main where
 
 import Control.Applicative ( (<$>) )
-import Control.Concurrent ( forkIO, yield )
-import Control.Monad ( forever, sequence_, unless, void )
-import Control.Monad.State hiding ( mapM )
+import Control.Monad ( forever, unless, void, when )
+import Control.Monad.IO.Class
+import Control.Monad.Trans.State
 import Data.Bits ( shiftL )
-import Data.Function ( on )
 import Data.Int ( Int16 )
-import Data.List ( find )
-import Data.Maybe ( fromJust, isJust, mapMaybe )
+import Data.Maybe ( fromJust, isJust )
 import Data.Sequence ( Seq )
 import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
@@ -29,7 +28,6 @@ import qualified Graphics.XHB.Gen.Shape as Shape
 import Graphics.XHB.Gen.Shape hiding ( mask )
 import qualified Graphics.XHB.Gen.XFixes as XFixes
     ( extension, queryVersion, QueryVersionReply(..) )
-import Graphics.XHB.Gen.XFixes
 import Prelude hiding ( init, mapM )
 
 main :: IO ()
@@ -37,10 +35,6 @@ main = do
     dpy <- maybe (error "Could not open display!") id <$> connect
     checkExtensions dpy
     init dpy >>= evalStateT (eventHandler dpy)
-    keepAlive dpy
-
-keepAlive :: Connection -> IO ()
-keepAlive !dpy = return ()
 
 data HollyState = HollyState
     { wins  :: Seq Win
@@ -176,8 +170,8 @@ checkExtensions dpy = do
 
 eventHandler :: Connection -> StateT HollyState IO ()
 eventHandler dpy = forever $ do
-    state <- get
-    liftIO $ paint dpy state
+    st <- get
+    liftIO $ paint dpy st
     ev <- liftIO $ waitForEvent dpy
     let handlers =
             [ createNotifyHandler dpy
@@ -185,7 +179,7 @@ eventHandler dpy = forever $ do
             , destroyNotifyHandler dpy
             , mapNotifyHandler dpy
             , unmapNotifyHandler dpy
-            , reparentNotifyHandler dpy $ root state
+            , reparentNotifyHandler dpy $ root st
             , circulateNotifyHandler
             , propertyNotifyHandler dpy
             ]
@@ -195,7 +189,7 @@ eventHandler dpy = forever $ do
             case mE of
                 Nothing -> return ()
                 Just e' -> handler e'
-    wins' <- liftIO $ execStateT (handler ev) $ wins state
+    wins' <- liftIO $ execStateT (handler ev) $ wins st
     modify $ \s -> s { wins = wins' }
 
 guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
@@ -224,7 +218,7 @@ createNotifyHandler dpy = guarded $ \ev -> do
 discardWindow :: Connection -> WINDOW -> StateT (Seq Win) IO ()
 discardWindow dpy wid = findWindowIx wid $ \ix -> do
     gets (flip S.index ix) >>= freeWindow dpy
-    modify $ \wins -> (S.take (ix - 1) wins) S.>< (S.drop ix wins)
+    modify $ \ws -> (S.take (ix - 1) ws) S.>< (S.drop ix ws)
 
 configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 configureNotifyHandler dpy = guarded $ \ev -> do
@@ -346,7 +340,7 @@ paint dpy holly = do
                             buffer (0, 0) (rootW holly, rootH holly)
             freePicture dpy rootPicture
 
-    mapM draw $ wins holly
+    void $ mapM draw $ wins holly
 
     simpleComposite dpy PictOpOver buffer Nothing
                     (overlayPicture holly) (0, 0) (rootW holly, rootH holly)
@@ -440,14 +434,15 @@ findScreenPictVisuals dpy =
     . (!! (screen $ displayInfo dpy)) . screens_QueryPictFormatsReply
     <$> (queryPictFormats dpy >>= getReply')
 
+
 instance Eq MapState where
-    a == b = toValue a == toValue b
+    a == b = toValue a == (toValue b :: Integer)
 
 instance Eq PictType where
-    a == b = toValue a == toValue b
+    a == b = toValue a == (toValue b :: Integer)
 
 instance Eq WindowClass where
-    a == b = toValue a == toValue b
+    a == b = toValue a == (toValue b :: Integer)
 
 getAtom :: Connection -> String -> Bool -> IO ATOM
 getAtom dpy name onlyIfExists =
@@ -473,7 +468,12 @@ getWindowOpacity dpy win = do
         , long_offset_GetProperty = 0
         , long_length_GetProperty = 1
         }) >>= getReply')
-    return $ if null val then 1.0 else fromIntegral (head val) / fromIntegral 0xff
+    return $! if null val
+        then 1.0
+        else fromIntegral (head val) / fromIntegral maxOpacity
+  where
+    maxOpacity :: Int
+    maxOpacity = 0xff
 
 createBuffer :: Connection -> DRAWABLE -> (Word16, Word16) -> Word8
              -> PICTFORMAT -> IO PICTURE

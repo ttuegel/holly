@@ -20,5 +20,5 @@ executable holly
   ghc-options:         -Wall
   build-depends:       base,
                        containers == 0.4.*,
-                       mtl == 2.0.*,
+                       transformers == 0.2.*,
                        xhb
