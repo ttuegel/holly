@@ -3,6 +3,7 @@
 module Main where
 
 import Control.Applicative ( (<$>) )
+import Control.Concurrent ( forkIO )
 import Control.Monad ( forever, unless, void, when )
 import Control.Monad.IO.Class
 import Control.Monad.Trans.State
@@ -33,8 +34,14 @@ import Prelude hiding ( init, mapM )
 main :: IO ()
 main = do
     dpy <- maybe (error "Could not open display!") id <$> connect
+    errorHandler dpy
     checkExtensions dpy
     init dpy >>= evalStateT (eventHandler dpy)
+
+errorHandler :: Connection -> IO ()
+errorHandler dpy = void $ forkIO $ forever $ do
+    err <- waitForError dpy
+    putStrLn $ show err
 
 data HollyState = HollyState
     { wins  :: Seq Win
