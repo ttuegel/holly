@@ -166,6 +166,13 @@ checkExtensions dpy = do
     damagePresent <- extensionPresent dpy Damage.extension
     unless damagePresent
         $ error "Damage extension required!"
+    damageVersion <- Damage.queryVersion dpy 1 1 >>= getReply'
+    let damageVersionOk =
+            (   Damage.major_version_QueryVersionReply damageVersion == 1
+             && Damage.minor_version_QueryVersionReply damageVersion >= 1
+            ) || Damage.major_version_QueryVersionReply damageVersion > 1
+    unless damageVersionOk
+        $ error "Damage extension version >= 1.1 required!"
 
 eventHandler :: Connection -> StateT HollyState IO ()
 eventHandler dpy = forever $ do
