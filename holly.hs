@@ -29,6 +29,7 @@ import qualified Graphics.XHB.Gen.Shape as Shape
 import Graphics.XHB.Gen.Shape hiding ( mask )
 import qualified Graphics.XHB.Gen.XFixes as XFixes
     ( extension, queryVersion, QueryVersionReply(..) )
+import Graphics.XHB.Gen.XFixes
 import Prelude hiding ( init, mapM )
 
 main :: IO ()
@@ -211,7 +212,7 @@ findWindowIx wid go = do
 
 updateWindow :: Connection -> Win -> StateT (Seq Win) IO ()
 updateWindow dpy new = findWindowIx (winId new) $ \oldIx -> do
-    gets (flip S.index oldIx) >>= freeWindow dpy
+    --gets (flip S.index oldIx) >>= freeWindow dpy
     modify $ S.update oldIx new
 
 freeWindow :: Connection -> Win -> StateT (Seq Win) IO ()
@@ -224,7 +225,7 @@ createNotifyHandler dpy = guarded $ \ev -> do
 
 discardWindow :: Connection -> WINDOW -> StateT (Seq Win) IO ()
 discardWindow dpy wid = findWindowIx wid $ \ix -> do
-    gets (flip S.index ix) >>= freeWindow dpy
+    --gets (flip S.index ix) >>= freeWindow dpy
     modify $ \ws -> (S.take (ix - 1) ws) S.>< (S.drop ix ws)
 
 configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
@@ -268,7 +269,7 @@ getWindow dpy wid = do
         , Damage.drawable_Create = toDrawable wid
         , Damage.level_Create = Damage.ReportLevelNonEmpty
         }
-    return $! Win
+    let win = Win
             { winX = x_GetGeometryReply geom
             , winY = y_GetGeometryReply geom
             , winW = width_GetGeometryReply geom
@@ -279,6 +280,15 @@ getWindow dpy wid = do
             , winOpacity = opacity
             , winDamage = dam
             }
+    damageWholeWindow dpy win
+    return $! win
+
+damageWholeWindow :: Connection -> Win -> IO ()
+damageWholeWindow dpy win = do
+    region <- newResource dpy
+    createRegion dpy region [ MkRECTANGLE 0 0 (winW win) (winH win) ]
+    Damage.add dpy (toDrawable $ winId win) region
+    destroyRegion dpy region
 
 circulateNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
 circulateNotifyHandler = guarded $ \ev -> modify $ \ws -> do
@@ -299,8 +309,10 @@ propertyNotifyHandler dpy = guarded $ \ev -> do
     if atom_PropertyNotifyEvent ev == opacityAtom
         then do
             newOpacity <- liftIO $ getWindowOpacity dpy wid
-            modify $ fmap $ \w ->
-                if winId w == wid then w { winOpacity = newOpacity } else w
+            findWindowIx wid $ \ix -> do
+                win <- gets $ flip S.index ix
+                liftIO $ damageWholeWindow dpy win
+                modify $ S.update ix $ win { winOpacity = newOpacity }
         else return ()
 
 paint :: Connection -> HollyState -> IO ()
@@ -310,6 +322,23 @@ paint dpy holly = do
         (toDrawable $! overlayWindow holly)
         (rootW holly, rootH holly)
         32 bufferFormat
+
+    overlayDamage <- newResource dpy
+    createRegion dpy overlayDamage []
+    let applyWindowDamage win = do
+            region <- newResource dpy
+            createRegion dpy region []
+            Damage.subtract dpy $! Damage.MkSubtract
+                (winDamage win) (fromXid xidNone) region
+            let b = fromIntegral $! winB win
+            translateRegion dpy $! MkTranslateRegion region
+                (winX win + b) (winY win + b)
+            unionRegion dpy $! MkUnionRegion region overlayDamage overlayDamage
+            destroyRegion dpy region
+        overlay = overlayPicture holly
+    void $ mapM applyWindowDamage $ wins holly
+    setPictureClipRegion dpy $! MkSetPictureClipRegion buffer overlayDamage 0 0
+    setPictureClipRegion dpy $! MkSetPictureClipRegion overlay overlayDamage 0 0
 
     let draw win = do
             pixm <- newResource dpy
@@ -350,7 +379,7 @@ paint dpy holly = do
     void $ mapM draw $ wins holly
 
     simpleComposite dpy PictOpOver buffer Nothing
-                    (overlayPicture holly) (0, 0) (rootW holly, rootH holly)
+                    overlay (0, 0) (rootW holly, rootH holly)
 
     freePicture dpy buffer
 
