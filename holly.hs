@@ -182,9 +182,9 @@ eventHandler dpy = forever $ do
     let handlers =
             [ createNotifyHandler dpy
             , configureNotifyHandler dpy
-            , destroyNotifyHandler
+            , destroyNotifyHandler dpy
             , mapNotifyHandler dpy
-            , unmapNotifyHandler
+            , unmapNotifyHandler dpy
             , reparentNotifyHandler dpy $ root state
             , circulateNotifyHandler
             , propertyNotifyHandler dpy
@@ -201,26 +201,45 @@ eventHandler dpy = forever $ do
 guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
 guarded f ev = let ev' = fromEvent ev in when (isJust ev') $ f $ fromJust ev'
 
+findWindowIx :: WINDOW -> (Int -> StateT (Seq Win) IO ()) -> StateT (Seq Win) IO ()
+findWindowIx wid go = do
+    mIx <- gets $ S.findIndexL ((== wid) . winId)
+    case mIx of
+        Nothing -> return ()
+        Just ix -> go ix
+
+updateWindow :: Connection -> Win -> StateT (Seq Win) IO ()
+updateWindow dpy new = findWindowIx (winId new) $ \oldIx -> do
+    gets (flip S.index oldIx) >>= freeWindow dpy
+    modify $ S.update oldIx new
+
+freeWindow :: Connection -> Win -> StateT (Seq Win) IO ()
+freeWindow dpy win = liftIO $ Damage.destroy dpy $ winDamage win
+
 createNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 createNotifyHandler dpy = guarded $ \ev -> do
     win <- liftIO $ getWindow dpy $ window_CreateNotifyEvent ev
     modify (S.|> win)
 
+discardWindow :: Connection -> WINDOW -> StateT (Seq Win) IO ()
+discardWindow dpy wid = findWindowIx wid $ \ix -> do
+    gets (flip S.index ix) >>= freeWindow dpy
+    modify $ \wins -> (S.take (ix - 1) wins) S.>< (S.drop ix wins)
+
 configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 configureNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
-    win <- liftIO $ getWindow dpy wid
-    modify $ fmap $ \w -> if winId w == wid then win else w
+    liftIO (getWindow dpy wid) >>= updateWindow dpy
 
-destroyNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
-destroyNotifyHandler = guarded $ \ev -> do
+destroyNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+destroyNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_DestroyNotifyEvent ev
-    modify $ S.filter $ (/= wid) . winId
+    discardWindow dpy wid
 
-unmapNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
-unmapNotifyHandler = guarded $ \ev -> do
+unmapNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+unmapNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_UnmapNotifyEvent ev
-    modify $ S.filter $ (/= wid) . winId
+    discardWindow dpy wid
 
 mapNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 mapNotifyHandler dpy = guarded $ \ev -> do
@@ -231,10 +250,8 @@ reparentNotifyHandler :: Connection -> WINDOW -> SomeEvent -> StateT (Seq Win) I
 reparentNotifyHandler dpy rootWindow = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
     if parent_ReparentNotifyEvent ev == rootWindow
-        then do
-            win <- liftIO $ getWindow dpy wid
-            modify (S.|> win)
-        else modify $ S.filter $ (/= wid) . winId
+        then liftIO (getWindow dpy wid) >>= \win -> modify (S.|> win)
+        else discardWindow dpy wid
 
 getWindow :: Connection -> WINDOW -> IO Win
 getWindow dpy wid = do
@@ -259,6 +276,7 @@ getWindow dpy wid = do
             , winId = wid
             , winFormat = fmt
             , winOpacity = opacity
+            , winDamage = dam
             }
 
 circulateNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
@@ -512,5 +530,6 @@ data Win = Win
     , winB  :: Word16
     , winFormat :: PICTFORMAT
     , winOpacity :: Double
+    , winDamage :: Damage.DAMAGE
     }
   deriving (Eq, Show)
