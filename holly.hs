@@ -9,7 +9,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Trans.State
 import Data.Bits ( shiftL )
 import Data.Int ( Int16 )
-import Data.Maybe ( fromJust, isJust )
+import Data.Maybe ( catMaybes, fromJust, isJust )
 import Data.Sequence ( Seq )
 import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
@@ -96,18 +96,8 @@ init dpy = do
          )]
     selectInput dpy r True
 
-    children <- children_QueryTreeReply
-        <$> (queryTree dpy r >>= getReply')
-    childrenAttrs <- mapM ((>>= getReply') . getWindowAttributes dpy) children
-    let childrenWithAttrs = filter viewable . filter (not . inputOnly)
-            $ zip children childrenAttrs
-        viewable =   (== MapStateViewable)
-                   . map_state_GetWindowAttributesReply
-                   . snd
-        inputOnly =   (== WindowClassInputOnly)
-                   . class_GetWindowAttributesReply
-                   . snd
-    ws <- mapM (getWindow dpy) $ map fst childrenWithAttrs
+    children <- children_QueryTreeReply <$> (queryTree dpy r >>= getReply')
+    ws <- catMaybes <$> mapM (getWindow dpy) children
 
     return $! HollyState
         { wins = S.fromList $! ws
@@ -220,8 +210,10 @@ freeWindow dpy win = liftIO $ Damage.destroy dpy $ winDamage win
 
 createNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 createNotifyHandler dpy = guarded $ \ev -> do
-    win <- liftIO $ getWindow dpy $ window_CreateNotifyEvent ev
-    modify (S.|> win)
+    mWin <- liftIO $ getWindow dpy $ window_CreateNotifyEvent ev
+    case mWin of
+        Nothing -> return ()
+        Just win -> modify (S.|> win)
 
 discardWindow :: Connection -> WINDOW -> StateT (Seq Win) IO ()
 discardWindow dpy wid = findWindowIx wid $ \ix -> do
@@ -231,7 +223,7 @@ discardWindow dpy wid = findWindowIx wid $ \ix -> do
 configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 configureNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
-    liftIO (getWindow dpy wid) >>= updateWindow dpy
+    liftIO (getWindow dpy wid) >>= maybe (return ()) (updateWindow dpy)
 
 destroyNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 destroyNotifyHandler dpy = guarded $ \ev -> do
@@ -245,43 +237,52 @@ unmapNotifyHandler dpy = guarded $ \ev -> do
 
 mapNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 mapNotifyHandler dpy = guarded $ \ev -> do
-    win <- liftIO $ getWindow dpy $ window_MapNotifyEvent ev
-    modify (S.|> win)
+    mWin <- liftIO $ getWindow dpy $ window_MapNotifyEvent ev
+    case mWin of
+        Nothing -> return ()
+        Just win -> modify (S.|> win)
 
 reparentNotifyHandler :: Connection -> WINDOW -> SomeEvent -> StateT (Seq Win) IO ()
 reparentNotifyHandler dpy rootWindow = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
     if parent_ReparentNotifyEvent ev == rootWindow
-        then liftIO (getWindow dpy wid) >>= \win -> modify (S.|> win)
+        then liftIO (getWindow dpy wid)
+            >>= maybe (return ()) (\win -> modify (S.|> win))
         else discardWindow dpy wid
 
-getWindow :: Connection -> WINDOW -> IO Win
+getWindow :: Connection -> WINDOW -> IO (Maybe Win)
 getWindow dpy wid = do
-    geom <- getGeometry dpy (toDrawable wid) >>= getReply'
     attrs <- getWindowAttributes dpy wid >>= getReply'
-    opacity <- getWindowOpacity dpy wid
-    fmt <- findVisualFormat dpy $ visual_GetWindowAttributesReply attrs
-    changeWindowAttributes dpy wid $! toValueParam
-        [(CWEventMask, toMask [ EventMaskPropertyChange ])]
-    dam <- newResource dpy
-    Damage.create dpy $! Damage.MkCreate
-        { Damage.damage_Create = dam
-        , Damage.drawable_Create = toDrawable wid
-        , Damage.level_Create = Damage.ReportLevelNonEmpty
-        }
-    let win = Win
-            { winX = x_GetGeometryReply geom
-            , winY = y_GetGeometryReply geom
-            , winW = width_GetGeometryReply geom
-            , winH = height_GetGeometryReply geom
-            , winB = border_width_GetGeometryReply geom
-            , winId = wid
-            , winFormat = fmt
-            , winOpacity = opacity
-            , winDamage = dam
-            }
-    damageWholeWindow dpy win
-    return $! win
+    if (inputOnly attrs || not (viewable attrs))
+        then return Nothing
+        else do
+            geom <- getGeometry dpy (toDrawable wid) >>= getReply'
+            opacity <- getWindowOpacity dpy wid
+            fmt <- findVisualFormat dpy $ visual_GetWindowAttributesReply attrs
+            changeWindowAttributes dpy wid $! toValueParam
+                [(CWEventMask, toMask [ EventMaskPropertyChange ])]
+            dam <- newResource dpy
+            Damage.create dpy $! Damage.MkCreate
+                { Damage.damage_Create = dam
+                , Damage.drawable_Create = toDrawable wid
+                , Damage.level_Create = Damage.ReportLevelNonEmpty
+                }
+            let win = Win
+                    { winX = x_GetGeometryReply geom
+                    , winY = y_GetGeometryReply geom
+                    , winW = width_GetGeometryReply geom
+                    , winH = height_GetGeometryReply geom
+                    , winB = border_width_GetGeometryReply geom
+                    , winId = wid
+                    , winFormat = fmt
+                    , winOpacity = opacity
+                    , winDamage = dam
+                    }
+            damageWholeWindow dpy win
+            return $! Just $! win
+  where
+    viewable = (== MapStateViewable) . map_state_GetWindowAttributesReply
+    inputOnly = (== WindowClassInputOnly) . class_GetWindowAttributesReply
 
 damageWholeWindow :: Connection -> Win -> IO ()
 damageWholeWindow dpy win = do
