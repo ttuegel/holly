@@ -40,9 +40,31 @@ main = do
     init dpy >>= evalStateT (eventHandler dpy)
 
 errorHandler :: Connection -> IO ()
-errorHandler dpy = void $ forkIO $ forever $ do
-    err <- waitForError dpy
-    putStrLn $ show err
+errorHandler dpy = void $ forkIO $ do
+    let extensions =
+            [ Composite.extension
+            , Render.extension
+            , Damage.extension
+            , XFixes.extension
+            , Shape.extension
+            ]
+        names =
+            [ "Composite"
+            , "Render"
+            , "Damage"
+            , "Fixes"
+            , "Shape"
+            ]
+    opCodes <- mapM (extensionOpCode dpy) extensions
+    let extOpCodes = zip opCodes names
+    forever $ do
+        err <- waitForError dpy
+        case fromError err of
+            Nothing -> return ()
+            Just match -> case lookup (major_opcode_MatchError match) extOpCodes of
+                Nothing -> return ()
+                Just name -> putStr $ name ++ ": "
+        putStrLn $ show err
 
 data HollyState = HollyState
     { wins  :: Seq Win
@@ -340,6 +362,7 @@ paint dpy holly = do
     void $ mapM applyWindowDamage $ wins holly
     setPictureClipRegion dpy $! MkSetPictureClipRegion buffer overlayDamage 0 0
     setPictureClipRegion dpy $! MkSetPictureClipRegion overlay overlayDamage 0 0
+    destroyRegion dpy overlayDamage
 
     let draw win = do
             pixm <- newResource dpy
