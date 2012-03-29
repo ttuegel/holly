@@ -76,6 +76,7 @@ data HollyState = HollyState
     , overlayPicture :: PICTURE
     , overlayWindow :: WINDOW
     , bufferPicture :: PICTURE
+    , extraRepaint  :: REGION
     }
 
 init :: Connection -> IO HollyState
@@ -122,22 +123,28 @@ init dpy = do
     children <- children_QueryTreeReply <$> (queryTree dpy r >>= getReply')
     ws <- catMaybes <$> mapM (getWindow dpy) children
 
+    let w = width_GetGeometryReply geom
+        h = height_GetGeometryReply geom
     bufferFormat <- findStandardFormat dpy True
     buffer <- createBuffer dpy
         (toDrawable overlayW)
-        (width_GetGeometryReply geom, height_GetGeometryReply geom)
+        (w, h)
         32 bufferFormat
+
+    extra <- newResource dpy
+    createRegion dpy extra [ MkRECTANGLE 0 0 w h ]
 
     return $! HollyState
         { wins = S.fromList $! ws
         , scr = s
         , root = r
-        , rootW = width_GetGeometryReply geom
-        , rootH = height_GetGeometryReply geom
+        , rootW = w
+        , rootH = h
         , rootFormat = rootF
         , overlayPicture = overlayP
         , overlayWindow = overlayW
         , bufferPicture = buffer
+        , extraRepaint = extra
         }
 
 getReply' :: Receipt a -> IO a
@@ -204,10 +211,10 @@ eventHandler dpy = forever $ do
     let handlers =
             [ createNotifyHandler dpy
             , configureNotifyHandler dpy
-            , destroyNotifyHandler dpy
+            , destroyNotifyHandler dpy $ extraRepaint st
             , mapNotifyHandler dpy
-            , unmapNotifyHandler dpy
-            , reparentNotifyHandler dpy $ root st
+            , unmapNotifyHandler dpy $ extraRepaint st
+            , reparentNotifyHandler dpy (extraRepaint st) $ root st
             , circulateNotifyHandler
             , propertyNotifyHandler dpy
             ]
@@ -247,9 +254,21 @@ createNotifyHandler dpy = guarded $ \ev -> do
         Nothing -> return ()
         Just win -> modify (S.|> win)
 
-discardWindow :: Connection -> WINDOW -> StateT (Seq Win) IO ()
-discardWindow dpy wid = findWindowIx wid $ \ix -> do
-    gets (flip S.index ix) >>= freeWindow dpy
+discardWindow :: Connection -> REGION -> WINDOW -> StateT (Seq Win) IO ()
+discardWindow dpy extra wid = findWindowIx wid $ \ix -> do
+    win <- gets $ flip S.index ix
+    let x = winX win
+        y = winY win
+        w = winW win
+        h = winH win
+        b = winB win
+    liftIO $ do
+        winRegion <- newResource dpy
+        createRegion dpy winRegion
+            [ MkRECTANGLE x y (w + b + b) (h + b + b) ]
+        unionRegion dpy $! MkUnionRegion winRegion extra extra
+        destroyRegion dpy winRegion
+    freeWindow dpy win
     modify $ S.filter ((/= wid) . winId)
 
 configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
@@ -257,15 +276,15 @@ configureNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
     liftIO (getWindow dpy wid) >>= maybe (return ()) (updateWindow dpy)
 
-destroyNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
-destroyNotifyHandler dpy = guarded $ \ev -> do
+destroyNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT (Seq Win) IO ()
+destroyNotifyHandler dpy extra = guarded $ \ev -> do
     let wid = window_DestroyNotifyEvent ev
-    discardWindow dpy wid
+    discardWindow dpy extra wid
 
-unmapNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
-unmapNotifyHandler dpy = guarded $ \ev -> do
+unmapNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT (Seq Win) IO ()
+unmapNotifyHandler dpy extra = guarded $ \ev -> do
     let wid = window_UnmapNotifyEvent ev
-    discardWindow dpy wid
+    discardWindow dpy extra wid
 
 mapNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 mapNotifyHandler dpy = guarded $ \ev -> do
@@ -274,13 +293,13 @@ mapNotifyHandler dpy = guarded $ \ev -> do
         Nothing -> return ()
         Just win -> modify (S.|> win)
 
-reparentNotifyHandler :: Connection -> WINDOW -> SomeEvent -> StateT (Seq Win) IO ()
-reparentNotifyHandler dpy rootWindow = guarded $ \ev -> do
+reparentNotifyHandler :: Connection -> REGION -> WINDOW -> SomeEvent -> StateT (Seq Win) IO ()
+reparentNotifyHandler dpy extra rootWindow = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
     if parent_ReparentNotifyEvent ev == rootWindow
         then liftIO (getWindow dpy wid)
             >>= maybe (return ()) (\win -> modify (S.|> win))
-        else discardWindow dpy wid
+        else discardWindow dpy extra wid
 
 getWindow :: Connection -> WINDOW -> IO (Maybe Win)
 getWindow dpy wid = do
@@ -367,9 +386,8 @@ paint dpy holly = do
     let overlay = overlayPicture holly
         buffer = bufferPicture holly
 
-    overlayDamage <- newResource dpy
-    createRegion dpy overlayDamage []
-    let applyWindowDamage win = do
+    let overlayDamage = extraRepaint holly
+        applyWindowDamage win = do
             region <- newResource dpy
             createRegion dpy region []
             Damage.subtract dpy $! Damage.MkSubtract
@@ -382,7 +400,7 @@ paint dpy holly = do
     void $ mapM applyWindowDamage $ wins holly
     setPictureClipRegion dpy $! MkSetPictureClipRegion buffer overlayDamage 0 0
     setPictureClipRegion dpy $! MkSetPictureClipRegion overlay overlayDamage 0 0
-    destroyRegion dpy overlayDamage
+    setRegion dpy overlayDamage []
 
     let draw win = do
             mask <- solidPicture dpy (toDrawable $ overlayWindow holly)
