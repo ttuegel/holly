@@ -53,7 +53,7 @@ init dpy = do
         s = (!! scrNum) $ roots_Setup $ connectionSetup dpy
         r = root_SCREEN s
     geom <- getGeometry dpy (toDrawable r) >>= getReply'
-    redirectSubwindows dpy r RedirectManual
+    redirectSubwindows dpy r RedirectAutomatic
     let rootVisual = root_visual_SCREEN s
     rootF <- findVisualFormat dpy rootVisual
 
@@ -166,7 +166,7 @@ eventHandler dpy = forever $ do
     ev <- liftIO $ waitForEvent dpy
     let handlers =
             [ createNotifyHandler dpy
-            , configureNotifyHandler dpy
+            , configureNotifyHandler dpy $ extraRepaint st
             , destroyNotifyHandler dpy $ extraRepaint st
             , mapNotifyHandler dpy
             , unmapNotifyHandler dpy $ extraRepaint st
@@ -180,8 +180,7 @@ eventHandler dpy = forever $ do
             case mE of
                 Nothing -> return ()
                 Just e' -> handler e'
-    wins' <- liftIO $ execStateT (handler ev) $ wins st
-    modify $ \s -> s { wins = wins' }
+    handler ev
 
 paint :: Connection -> HollyState -> IO ()
 paint dpy holly = do
@@ -235,73 +234,62 @@ paint dpy holly = do
 
 -- Event Handlers -------------------------------------------------------
 
-createNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+createNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
 createNotifyHandler dpy = guarded $ \ev -> do
     mWin <- liftIO $ getWindow dpy $ window_CreateNotifyEvent ev
     case mWin of
         Nothing -> return ()
-        Just win -> modify (S.|> win)
+        Just win -> withWindows (S.|> win)
 
-discardWindow :: Connection -> REGION -> WINDOW -> StateT (Seq Win) IO ()
-discardWindow dpy extra wid = findWindowIx wid $ \ix -> do
-    win <- gets $ flip S.index ix
-    let x = winX win
-        y = winY win
-        w = winW win
-        h = winH win
-        b = winB win
-    liftIO $ do
-        winRegion <- newResource dpy
-        createRegion dpy winRegion
-            [ MkRECTANGLE x y (w + b + b) (h + b + b) ]
-        unionRegion dpy $! MkUnionRegion winRegion extra extra
-        destroyRegion dpy winRegion
-    freeWindow dpy win
-    modify $ S.filter ((/= wid) . winId)
-
-configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
-configureNotifyHandler dpy = guarded $ \ev -> do
+configureNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT HollyState IO ()
+configureNotifyHandler dpy extra = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
-    liftIO (getWindow dpy wid) >>= maybe (return ()) (updateWindow dpy)
+        abv = above_sibling_ConfigureNotifyEvent ev
+    findWindow wid $ discardWindow dpy extra
+    mNew <- liftIO $ getWindow dpy wid
+    case mNew of
+        Nothing -> return ()
+        Just new -> withWindows $ \ws ->
+            let (above, below) = S.spanr ((/= abv) . winId) ws
+            in below S.>< (new S.<| above)
 
-destroyNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT (Seq Win) IO ()
-destroyNotifyHandler dpy extra = guarded $ \ev -> do
-    let wid = window_DestroyNotifyEvent ev
-    discardWindow dpy extra wid
+destroyNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT HollyState IO ()
+destroyNotifyHandler dpy extra = guarded $ \ev ->
+    findWindow (window_DestroyNotifyEvent ev) $ discardWindow dpy extra
 
-unmapNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT (Seq Win) IO ()
-unmapNotifyHandler dpy extra = guarded $ \ev -> do
-    let wid = window_UnmapNotifyEvent ev
-    discardWindow dpy extra wid
+unmapNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT HollyState IO ()
+unmapNotifyHandler dpy extra = guarded $ \ev ->
+    findWindow (window_UnmapNotifyEvent ev) $ discardWindow dpy extra
 
-mapNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+mapNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
 mapNotifyHandler dpy = guarded $ \ev -> do
     mWin <- liftIO $ getWindow dpy $ window_MapNotifyEvent ev
     case mWin of
         Nothing -> return ()
-        Just win -> modify (S.|> win)
+        Just win -> withWindows (S.|> win)
 
-reparentNotifyHandler :: Connection -> REGION -> WINDOW -> SomeEvent -> StateT (Seq Win) IO ()
+reparentNotifyHandler :: Connection -> REGION -> WINDOW -> SomeEvent -> StateT HollyState IO ()
 reparentNotifyHandler dpy extra rootWindow = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
     if parent_ReparentNotifyEvent ev == rootWindow
         then liftIO (getWindow dpy wid)
-            >>= maybe (return ()) (\win -> modify (S.|> win))
-        else discardWindow dpy extra wid
+            >>= maybe (return ()) (\win -> withWindows (win S.<|))
+        else findWindow wid $ discardWindow dpy extra
 
-circulateNotifyHandler :: SomeEvent -> StateT (Seq Win) IO ()
-circulateNotifyHandler = guarded $ \ev -> modify $ \ws -> do
-    let wid = window_CirculateNotifyEvent ev
-        ws' = S.filter ((/= wid) . winId) ws
-    case S.findIndexL ((== wid) . winId) ws of
-        Nothing -> ws
-        Just wIx ->
-            let win = S.index ws wIx
-            in case place_CirculateNotifyEvent ev of
-                PlaceOnTop -> win S.<| ws'
-                PlaceOnBottom -> ws' S.|> win
+circulateNotifyHandler :: SomeEvent -> StateT HollyState IO ()
+circulateNotifyHandler = guarded $ \ev -> do
+    withWindows $ \ws -> do
+        let wid = window_CirculateNotifyEvent ev
+            ws' = S.filter ((/= wid) . winId) ws
+        case S.findIndexL ((== wid) . winId) ws of
+            Nothing -> ws
+            Just wIx ->
+                let win = S.index ws wIx
+                in case place_CirculateNotifyEvent ev of
+                    PlaceOnBottom -> win S.<| ws'
+                    PlaceOnTop -> ws' S.|> win
 
-propertyNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
+propertyNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
 propertyNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_PropertyNotifyEvent ev
     opacityAtom <- liftIO $ getAtom dpy "_NET_WM_WINDOW_OPACITY" False
@@ -309,9 +297,9 @@ propertyNotifyHandler dpy = guarded $ \ev -> do
         then do
             newOpacity <- liftIO $ getWindowOpacity dpy wid
             findWindowIx wid $ \ix -> do
-                win <- gets $ flip S.index ix
+                win <- gets $ flip S.index ix . wins
                 liftIO $ damageWholeWindow dpy win
-                modify $ S.update ix $ win { winOpacity = newOpacity }
+                withWindows $ S.update ix $ win { winOpacity = newOpacity }
         else return ()
 
 -- Painting Utilities ---------------------------------------------------
@@ -453,19 +441,26 @@ getRootPixmap dpy rootWindow = do
 guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
 guarded f ev = let ev' = fromEvent ev in when (isJust ev') $ f $ fromJust ev'
 
-findWindowIx :: WINDOW -> (Int -> StateT (Seq Win) IO ()) -> StateT (Seq Win) IO ()
+findWindowIx :: WINDOW -> (Int -> StateT HollyState IO ()) -> StateT HollyState IO ()
 findWindowIx wid go =
-    gets (S.findIndexL ((== wid) . winId)) >>= maybe (return ()) go
+    gets (S.findIndexL ((== wid) . winId) . wins) >>= maybe (return ()) go
 
-updateWindow :: Connection -> Win -> StateT (Seq Win) IO ()
+findWindow :: WINDOW -> (Win -> StateT HollyState IO ()) -> StateT HollyState IO ()
+findWindow wid go = findWindowIx wid
+    $ \ix -> gets (flip S.index ix . wins) >>= go
+
+updateWindow :: Connection -> Win -> StateT HollyState IO ()
 updateWindow dpy new = findWindowIx (winId new) $ \oldIx -> do
-    gets (flip S.index oldIx) >>= freeWindow dpy
-    modify $ S.update oldIx new
+    gets (flip S.index oldIx . wins) >>= freeWindow dpy
+    withWindows $ S.update oldIx new
 
-freeWindow :: Connection -> Win -> StateT (Seq Win) IO ()
+freeWindow :: Connection -> Win -> StateT HollyState IO ()
 freeWindow dpy win = liftIO $ do
     Damage.destroy dpy $ winDamage win
     freePicture dpy $ winPicture win
+
+withWindows :: (Seq Win -> Seq Win) -> StateT HollyState IO ()
+withWindows f = modify $ \s -> s { wins = f (wins s) }
 
 getWindow :: Connection -> WINDOW -> IO (Maybe Win)
 getWindow dpy wid = do
@@ -521,6 +516,22 @@ damageWholeWindow dpy win = do
     createRegion dpy region [ MkRECTANGLE 0 0 (winW win) (winH win) ]
     Damage.add dpy (toDrawable $ winId win) region
     destroyRegion dpy region
+
+discardWindow :: Connection -> REGION -> Win -> StateT HollyState IO ()
+discardWindow dpy extra win = do
+    let x = winX win
+        y = winY win
+        w = winW win
+        h = winH win
+        b = winB win
+    liftIO $ do
+        winRegion <- newResource dpy
+        createRegion dpy winRegion
+            [ MkRECTANGLE x y (w + b + b) (h + b + b) ]
+        unionRegion dpy $! MkUnionRegion winRegion extra extra
+        destroyRegion dpy winRegion
+    freeWindow dpy win
+    withWindows $ S.filter ((/= winId win) . winId)
 
 
 -- Utilities ------------------------------------------------------------
