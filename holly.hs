@@ -385,9 +385,6 @@ paint dpy holly = do
     destroyRegion dpy overlayDamage
 
     let draw win = do
-            let idInt :: Word32
-                idInt = fromXid $ toXid $ winId win
-            putStrLn $ printf "painting window 0x%x" $ idInt
             mask <- solidPicture dpy (toDrawable $ overlayWindow holly)
                 (winOpacity win) Nothing
             simpleComposite
@@ -415,7 +412,6 @@ paint dpy holly = do
 
     simpleComposite dpy PictOpSrc buffer Nothing
                     overlay (0, 0) (rootW holly, rootH holly)
-    putStrLn "paint end"
 
 simpleComposite
     :: Connection
