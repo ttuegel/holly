@@ -75,6 +75,7 @@ data HollyState = HollyState
     , rootFormat :: PICTFORMAT
     , overlayPicture :: PICTURE
     , overlayWindow :: WINDOW
+    , bufferPicture :: PICTURE
     }
 
 init :: Connection -> IO HollyState
@@ -121,6 +122,12 @@ init dpy = do
     children <- children_QueryTreeReply <$> (queryTree dpy r >>= getReply')
     ws <- catMaybes <$> mapM (getWindow dpy) children
 
+    bufferFormat <- findStandardFormat dpy True
+    buffer <- createBuffer dpy
+        (toDrawable overlayW)
+        (width_GetGeometryReply geom, height_GetGeometryReply geom)
+        32 bufferFormat
+
     return $! HollyState
         { wins = S.fromList $! ws
         , scr = s
@@ -130,6 +137,7 @@ init dpy = do
         , rootFormat = rootF
         , overlayPicture = overlayP
         , overlayWindow = overlayW
+        , bufferPicture = buffer
         }
 
 getReply' :: Receipt a -> IO a
@@ -224,11 +232,13 @@ findWindowIx wid go = do
 
 updateWindow :: Connection -> Win -> StateT (Seq Win) IO ()
 updateWindow dpy new = findWindowIx (winId new) $ \oldIx -> do
-    --gets (flip S.index oldIx) >>= freeWindow dpy
+    gets (flip S.index oldIx) >>= freeWindow dpy
     modify $ S.update oldIx new
 
 freeWindow :: Connection -> Win -> StateT (Seq Win) IO ()
-freeWindow dpy win = liftIO $ Damage.destroy dpy $ winDamage win
+freeWindow dpy win = liftIO $ do
+    Damage.destroy dpy $ winDamage win
+    freePicture dpy $ winPicture win
 
 createNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 createNotifyHandler dpy = guarded $ \ev -> do
@@ -239,8 +249,8 @@ createNotifyHandler dpy = guarded $ \ev -> do
 
 discardWindow :: Connection -> WINDOW -> StateT (Seq Win) IO ()
 discardWindow dpy wid = findWindowIx wid $ \ix -> do
-    --gets (flip S.index ix) >>= freeWindow dpy
-    modify $ \ws -> (S.take (ix - 1) ws) S.>< (S.drop ix ws)
+    gets (flip S.index ix) >>= freeWindow dpy
+    modify $ S.filter ((/= wid) . winId)
 
 configureNotifyHandler :: Connection -> SomeEvent -> StateT (Seq Win) IO ()
 configureNotifyHandler dpy = guarded $ \ev -> do
@@ -289,6 +299,19 @@ getWindow dpy wid = do
                 , Damage.drawable_Create = toDrawable wid
                 , Damage.level_Create = Damage.ReportLevelNonEmpty
                 }
+            pixmap <- newResource dpy
+            nameWindowPixmap dpy wid pixmap
+            pict <- newResource dpy
+            createPicture dpy $ MkCreatePicture
+                { pid_CreatePicture = pict
+                , drawable_CreatePicture = toDrawable pixmap
+                , format_CreatePicture = fmt
+                , value_CreatePicture = toValueParam
+                    [( CPSubwindowMode
+                     , toValue SubwindowModeIncludeInferiors
+                     )]
+                }
+            freePixmap dpy pixmap
             let win = Win
                     { winX = x_GetGeometryReply geom
                     , winY = y_GetGeometryReply geom
@@ -299,6 +322,7 @@ getWindow dpy wid = do
                     , winFormat = fmt
                     , winOpacity = opacity
                     , winDamage = dam
+                    , winPicture = pict
                     }
             damageWholeWindow dpy win
             return $! Just $! win
@@ -340,11 +364,8 @@ propertyNotifyHandler dpy = guarded $ \ev -> do
 
 paint :: Connection -> HollyState -> IO ()
 paint dpy holly = do
-    bufferFormat <- findStandardFormat dpy True
-    buffer <- createBuffer dpy
-        (toDrawable $! overlayWindow holly)
-        (rootW holly, rootH holly)
-        32 bufferFormat
+    let overlay = overlayPicture holly
+        buffer = bufferPicture holly
 
     overlayDamage <- newResource dpy
     createRegion dpy overlayDamage []
@@ -358,32 +379,22 @@ paint dpy holly = do
                 (winX win + b) (winY win + b)
             unionRegion dpy $! MkUnionRegion region overlayDamage overlayDamage
             destroyRegion dpy region
-        overlay = overlayPicture holly
     void $ mapM applyWindowDamage $ wins holly
     setPictureClipRegion dpy $! MkSetPictureClipRegion buffer overlayDamage 0 0
     setPictureClipRegion dpy $! MkSetPictureClipRegion overlay overlayDamage 0 0
     destroyRegion dpy overlayDamage
 
     let draw win = do
-            pixm <- newResource dpy
-            nameWindowPixmap dpy (winId win) pixm
+            let idInt :: Word32
+                idInt = fromXid $ toXid $ winId win
+            putStrLn $ printf "painting window 0x%x" $ idInt
             mask <- solidPicture dpy (toDrawable $ overlayWindow holly)
                 (winOpacity win) Nothing
-            pict <- newResource dpy
-            createPicture dpy $ MkCreatePicture
-                { pid_CreatePicture = pict
-                , drawable_CreatePicture = toDrawable pixm
-                , format_CreatePicture = winFormat win
-                , value_CreatePicture = toValueParam
-                    [( CPSubwindowMode
-                     , toValue SubwindowModeIncludeInferiors
-                     )]
-                }
             simpleComposite
-                dpy PictOpOver pict (Just mask) buffer
+                dpy PictOpOver (winPicture win) (Just mask) buffer
                 (winX win, winY win)
                 (winW win + winB win + winB win, winH win + winB win + winB win)
-            freePicture dpy pict
+            freePicture dpy mask
 
     mRootPixmap <- getRootPixmap dpy $ root holly
     case mRootPixmap of
@@ -402,10 +413,9 @@ paint dpy holly = do
 
     void $ mapM draw $ wins holly
 
-    simpleComposite dpy PictOpOver buffer Nothing
+    simpleComposite dpy PictOpSrc buffer Nothing
                     overlay (0, 0) (rootW holly, rootH holly)
-
-    freePicture dpy buffer
+    putStrLn "paint end"
 
 simpleComposite
     :: Connection
@@ -591,5 +601,6 @@ data Win = Win
     , winFormat :: PICTFORMAT
     , winOpacity :: Double
     , winDamage :: Damage.DAMAGE
+    , winPicture    :: PICTURE
     }
   deriving (Eq, Show)
