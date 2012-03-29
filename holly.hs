@@ -166,11 +166,11 @@ eventHandler dpy = forever $ do
     ev <- liftIO $ waitForEvent dpy
     let handlers =
             [ createNotifyHandler dpy
-            , configureNotifyHandler dpy $ extraRepaint st
-            , destroyNotifyHandler dpy $ extraRepaint st
+            , configureNotifyHandler dpy
+            , destroyNotifyHandler dpy
             , mapNotifyHandler dpy
-            , unmapNotifyHandler dpy $ extraRepaint st
-            , reparentNotifyHandler dpy (extraRepaint st) $ root st
+            , unmapNotifyHandler dpy
+            , reparentNotifyHandler dpy
             , circulateNotifyHandler
             , propertyNotifyHandler dpy
             ]
@@ -241,11 +241,11 @@ createNotifyHandler dpy = guarded $ \ev -> do
         Nothing -> return ()
         Just win -> withWindows (S.|> win)
 
-configureNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT HollyState IO ()
-configureNotifyHandler dpy extra = guarded $ \ev -> do
+configureNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
+configureNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
         abv = above_sibling_ConfigureNotifyEvent ev
-    findWindow wid $ discardWindow dpy extra
+    findWindow wid $ discardWindow dpy
     mNew <- liftIO $ getWindow dpy wid
     case mNew of
         Nothing -> return ()
@@ -253,13 +253,13 @@ configureNotifyHandler dpy extra = guarded $ \ev -> do
             let (above, below) = S.spanr ((/= abv) . winId) ws
             in below S.>< (new S.<| above)
 
-destroyNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT HollyState IO ()
-destroyNotifyHandler dpy extra = guarded $ \ev ->
-    findWindow (window_DestroyNotifyEvent ev) $ discardWindow dpy extra
+destroyNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
+destroyNotifyHandler dpy = guarded $ \ev ->
+    findWindow (window_DestroyNotifyEvent ev) $ discardWindow dpy
 
-unmapNotifyHandler :: Connection -> REGION -> SomeEvent -> StateT HollyState IO ()
-unmapNotifyHandler dpy extra = guarded $ \ev ->
-    findWindow (window_UnmapNotifyEvent ev) $ discardWindow dpy extra
+unmapNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
+unmapNotifyHandler dpy = guarded $ \ev ->
+    findWindow (window_UnmapNotifyEvent ev) $ discardWindow dpy
 
 mapNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
 mapNotifyHandler dpy = guarded $ \ev -> do
@@ -268,13 +268,14 @@ mapNotifyHandler dpy = guarded $ \ev -> do
         Nothing -> return ()
         Just win -> withWindows (S.|> win)
 
-reparentNotifyHandler :: Connection -> REGION -> WINDOW -> SomeEvent -> StateT HollyState IO ()
-reparentNotifyHandler dpy extra rootWindow = guarded $ \ev -> do
+reparentNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
+reparentNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
+    rootWindow <- gets root
     if parent_ReparentNotifyEvent ev == rootWindow
         then liftIO (getWindow dpy wid)
             >>= maybe (return ()) (\win -> withWindows (win S.<|))
-        else findWindow wid $ discardWindow dpy extra
+        else findWindow wid $ discardWindow dpy
 
 circulateNotifyHandler :: SomeEvent -> StateT HollyState IO ()
 circulateNotifyHandler = guarded $ \ev -> do
@@ -517,8 +518,9 @@ damageWholeWindow dpy win = do
     Damage.add dpy (toDrawable $ winId win) region
     destroyRegion dpy region
 
-discardWindow :: Connection -> REGION -> Win -> StateT HollyState IO ()
-discardWindow dpy extra win = do
+discardWindow :: Connection -> Win -> StateT HollyState IO ()
+discardWindow dpy win = do
+    extra <- gets extraRepaint
     let x = winX win
         y = winY win
         w = winW win
