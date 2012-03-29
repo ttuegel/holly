@@ -64,9 +64,7 @@ init dpy = do
         , drawable_CreatePicture = toDrawable overlayW
         , format_CreatePicture = rootF
         , value_CreatePicture = toValueParam
-            [( CPSubwindowMode
-             , toValue SubwindowModeIncludeInferiors
-             )]
+            [(CPSubwindowMode, toValue SubwindowModeIncludeInferiors)]
         }
     rectangles dpy $! MkRectangles
         { operation_Rectangles = SOSet
@@ -94,10 +92,7 @@ init dpy = do
     let w = width_GetGeometryReply geom
         h = height_GetGeometryReply geom
     bufferFormat <- findStandardFormat dpy True
-    buffer <- createBuffer dpy
-        (toDrawable overlayW)
-        (w, h)
-        32 bufferFormat
+    buffer <- createBuffer dpy (toDrawable overlayW) (w, h) 32 bufferFormat
 
     extra <- newResource dpy
     createRegion dpy extra [ MkRECTANGLE 0 0 w h ]
@@ -319,7 +314,7 @@ propertyNotifyHandler dpy = guarded $ \ev -> do
                 modify $ S.update ix $ win { winOpacity = newOpacity }
         else return ()
 
--- Painting Utilities
+-- Painting Utilities ---------------------------------------------------
 
 simpleComposite
     :: Connection
@@ -364,14 +359,7 @@ solidPicture dpy draw a mRGB = do
             , blue_COLOR = round $ b * 0xffff
             , alpha_COLOR = round $ a * 0xffff
             }
-        , rects_FillRectangles =
-            [ MkRECTANGLE
-                { x_RECTANGLE = 0
-                , y_RECTANGLE = 0
-                , width_RECTANGLE = 1
-                , height_RECTANGLE = 1
-                }
-            ]
+        , rects_FillRectangles = [ MkRECTANGLE 0 0 1 1 ]
         }
 
     return picture
@@ -391,8 +379,7 @@ findStandardFormat dpy argb = do
         <$> (queryPictFormats dpy >>= getReply')
 
 findScreenFormats :: Connection -> IO [PICTFORMAT]
-findScreenFormats dpy =
-    map format_PICTVISUAL <$> findScreenPictVisuals dpy
+findScreenFormats dpy = map format_PICTVISUAL <$> findScreenPictVisuals dpy
 
 findScreenPictVisuals :: Connection -> IO [PICTVISUAL]
 findScreenPictVisuals dpy =
@@ -424,13 +411,7 @@ createBuffer :: Connection -> DRAWABLE -> (Word16, Word16) -> Word8
              -> PICTFORMAT -> IO PICTURE
 createBuffer dpy draw (w, h) depth format = do
     pixmap <- newResource dpy
-    createPixmap dpy $ MkCreatePixmap
-        { depth_CreatePixmap = depth
-        , pid_CreatePixmap = pixmap
-        , drawable_CreatePixmap = draw
-        , width_CreatePixmap = w
-        , height_CreatePixmap = h
-        }
+    createPixmap dpy $! MkCreatePixmap depth pixmap draw w h
 
     picture <- newResource dpy
     createPicture dpy $ MkCreatePicture
@@ -473,11 +454,8 @@ guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
 guarded f ev = let ev' = fromEvent ev in when (isJust ev') $ f $ fromJust ev'
 
 findWindowIx :: WINDOW -> (Int -> StateT (Seq Win) IO ()) -> StateT (Seq Win) IO ()
-findWindowIx wid go = do
-    mIx <- gets $ S.findIndexL ((== wid) . winId)
-    case mIx of
-        Nothing -> return ()
-        Just ix -> go ix
+findWindowIx wid go =
+    gets (S.findIndexL ((== wid) . winId)) >>= maybe (return ()) go
 
 updateWindow :: Connection -> Win -> StateT (Seq Win) IO ()
 updateWindow dpy new = findWindowIx (winId new) $ \oldIx -> do
