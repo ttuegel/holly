@@ -199,7 +199,7 @@ paint dpy holly = do
                 (winDamage win) (fromXid xidNone) region
             let b = fromIntegral $! winB win
             translateRegion dpy $! MkTranslateRegion region
-                (winX win + b) (winY win + b)
+                (winX win - b) (winY win - b)
             unionRegion dpy $! MkUnionRegion region overlayDamage overlayDamage
             destroyRegion dpy region
     void $ mapM applyWindowDamage $ wins holly
@@ -483,14 +483,14 @@ getWindow wid = do
                         fmt <- findVisualFormat dpy $ visual_GetWindowAttributesReply attrs
                         changeWindowAttributes dpy wid $! toValueParam
                             [(CWEventMask, toMask [ EventMaskPropertyChange ])]
+                        pixmap <- newResource dpy
+                        nameWindowPixmap dpy wid pixmap
                         dam <- newResource dpy
                         Damage.create dpy $! Damage.MkCreate
                             { Damage.damage_Create = dam
-                            , Damage.drawable_Create = toDrawable wid
+                            , Damage.drawable_Create = toDrawable pixmap
                             , Damage.level_Create = Damage.ReportLevelNonEmpty
                             }
-                        pixmap <- newResource dpy
-                        nameWindowPixmap dpy wid pixmap
                         pict <- newResource dpy
                         createPicture dpy $ MkCreatePicture
                             { pid_CreatePicture = pict
@@ -522,12 +522,18 @@ getWindow wid = do
 
 damageWholeWindow :: Win -> StateT HollyState IO ()
 damageWholeWindow win = do
+    let x = winX win
+        y = winY win
+        w = winW win
+        h = winH win
+        bI = fromIntegral $ winB win
+        bW = winB win
     extra <- gets extraRepaint
     dpy <- gets display
     liftIO $ do
         region <- newResource dpy
         createRegion dpy region
-            [ MkRECTANGLE (winX win) (winY win) (winW win) (winH win) ]
+            [ MkRECTANGLE (x - bI) (y - bI) (w + bW * bW) (h + bW * bW) ]
         unionRegion dpy $! MkUnionRegion region extra extra
         destroyRegion dpy region
 
