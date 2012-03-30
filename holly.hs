@@ -190,6 +190,7 @@ paint :: Connection -> HollyState -> IO ()
 paint dpy holly = do
     let overlay = overlayPicture holly
         buffer = bufferPicture holly
+        solidWindows = S.filter ((> 0.98) . winOpacity) $ wins holly
 
     let overlayDamage = extraRepaint holly
         applyWindowDamage win = do
@@ -533,7 +534,7 @@ damageWholeWindow win = do
     liftIO $ do
         region <- newResource dpy
         createRegion dpy region
-            [ MkRECTANGLE (x - bI) (y - bI) (w + bW * bW) (h + bW * bW) ]
+            [ MkRECTANGLE (x - bI) (y - bI) (w + bW + bW) (h + bW + bW) ]
         unionRegion dpy $! MkUnionRegion region extra extra
         destroyRegion dpy region
 
