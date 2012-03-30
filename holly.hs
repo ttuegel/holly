@@ -1,5 +1,4 @@
 {-# LANGUAGE BangPatterns #-}
-{-# OPTIONS_GHC -fno-warn-orphans #-}
 module Main where
 
 import Control.Applicative ( (<$>) )
@@ -7,13 +6,10 @@ import Control.Concurrent ( forkIO )
 import Control.Monad ( forever, unless, void, when )
 import Control.Monad.IO.Class
 import Control.Monad.Trans.State
-import Data.Bits ( shiftL )
-import Data.Int ( Int16 )
 import Data.Maybe ( catMaybes, fromJust, isJust )
 import Data.Sequence ( Seq )
 import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
-import Data.Word ( Word8, Word16, Word32 )
 import Graphics.XHB
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension, queryVersion, QueryVersionReply(..) )
@@ -31,6 +27,11 @@ import qualified Graphics.XHB.Gen.XFixes as XFixes
     ( extension, queryVersion, QueryVersionReply(..) )
 import Graphics.XHB.Gen.XFixes
 import Prelude hiding ( init, mapM )
+
+import Holly.Drawable
+import Holly.Missing
+import Holly.Paint
+import Holly.Types
 
 -- Main Loop ------------------------------------------------------------
 
@@ -186,56 +187,6 @@ eventHandler dpy = forever $ do
                 Just e' -> handler e'
     handler ev
 
-paint :: Connection -> HollyState -> IO ()
-paint dpy holly = do
-    let overlay = overlayPicture holly
-        buffer = bufferPicture holly
-
-    let overlayDamage = extraRepaint holly
-        applyWindowDamage win = do
-            region <- newResource dpy
-            createRegion dpy region []
-            Damage.subtract dpy $! Damage.MkSubtract
-                (winDamage win) (fromXid xidNone) region
-            let b = fromIntegral $! winB win
-            translateRegion dpy $! MkTranslateRegion region
-                (winX win - b) (winY win - b)
-            unionRegion dpy $! MkUnionRegion region overlayDamage overlayDamage
-            destroyRegion dpy region
-    void $ mapM applyWindowDamage $ wins holly
-    setPictureClipRegion dpy $! MkSetPictureClipRegion buffer overlayDamage 0 0
-    setPictureClipRegion dpy $! MkSetPictureClipRegion overlay overlayDamage 0 0
-    setRegion dpy overlayDamage []
-
-    let draw win = do
-            mask <- solidPicture dpy (toDrawable $ overlayWindow holly)
-                (winOpacity win) Nothing
-            simpleComposite
-                dpy PictOpOver (winPicture win) (Just mask) buffer
-                (winX win, winY win)
-                (winW win + winB win + winB win, winH win + winB win + winB win)
-            freePicture dpy mask
-
-    mRootPixmap <- getRootPixmap dpy $ root holly
-    case mRootPixmap of
-        Nothing -> return ()
-        Just rootPixmap -> do
-            rootPicture <- newResource dpy
-            createPicture dpy $! MkCreatePicture
-                { pid_CreatePicture = rootPicture
-                , drawable_CreatePicture = toDrawable rootPixmap
-                , format_CreatePicture = rootFormat holly
-                , value_CreatePicture = emptyValueParam
-                }
-            simpleComposite dpy PictOpSrc rootPicture Nothing
-                            buffer (0, 0) (rootW holly, rootH holly)
-            freePicture dpy rootPicture
-
-    void $ mapM draw $ wins holly
-
-    simpleComposite dpy PictOpSrc buffer Nothing
-                    overlay (0, 0) (rootW holly, rootH holly)
-
 -- Event Handlers -------------------------------------------------------
 
 createNotifyHandler ::SomeEvent -> StateT HollyState IO ()
@@ -307,139 +258,6 @@ propertyNotifyHandler = guarded $ \ev -> do
                 damageWholeWindow win
                 withWindows $ S.update ix $ win { winOpacity = newOpacity }
         else return ()
-
--- Painting Utilities ---------------------------------------------------
-
-simpleComposite
-    :: Connection
-    -> PictOp           -- operation
-    -> PICTURE          -- source
-    -> Maybe PICTURE    -- mask
-    -> PICTURE          -- destination
-    -> (Int16, Int16)   -- (x, y)
-    -> (Word16, Word16) -- (width, height)
-    -> IO ()
-simpleComposite dpy op src mask dest (x, y) (w, h) =
-    composite dpy $! MkComposite
-        { op_Composite = op
-        , src_Composite = src
-        , mask_Composite = maybe (fromXid xidNone) id mask
-        , dst_Composite = dest
-        , src_x_Composite = 0
-        , src_y_Composite = 0
-        , mask_x_Composite = 0
-        , mask_y_Composite = 0
-        , dst_x_Composite = x
-        , dst_y_Composite = y
-        , width_Composite = w
-        , height_Composite = h
-        }
-
-solidPicture :: Connection -> DRAWABLE -> Double
-             -> Maybe (Double, Double, Double) -> IO PICTURE
-solidPicture dpy draw a mRGB = do
-    format <- findStandardFormat dpy (isJust mRGB)
-    picture <- createBuffer dpy draw (1, 1) (if isJust mRGB then 32 else 8) format
-
-    let r = maybe 0.0 (\(x, _, _) -> x) mRGB
-        g = maybe 0.0 (\(_, x, _) -> x) mRGB
-        b = maybe 0.0 (\(_, _, x) -> x) mRGB
-    fillRectangles dpy $ MkFillRectangles
-        { op_FillRectangles = PictOpSrc
-        , dst_FillRectangles = picture
-        , color_FillRectangles = MkCOLOR
-            { red_COLOR = round $ r * 0xffff
-            , green_COLOR = round $ g * 0xffff
-            , blue_COLOR = round $ b * 0xffff
-            , alpha_COLOR = round $ a * 0xffff
-            }
-        , rects_FillRectangles = [ MkRECTANGLE 0 0 1 1 ]
-        }
-
-    return picture
-
-findVisualFormat :: Connection -> VISUALID -> IO PICTFORMAT
-findVisualFormat dpy vid =
-    format_PICTVISUAL . head
-        . filter ((== vid) . visual_PICTVISUAL)
-        <$> findScreenPictVisuals dpy
-
-findStandardFormat :: Connection -> Bool -> IO PICTFORMAT
-findStandardFormat dpy argb = do
-    id_PICTFORMINFO . head
-        . filter ((== (if argb then 32 else 8)) . depth_PICTFORMINFO)
-        . filter ((== PictTypeDirect) . type_PICTFORMINFO)
-        . formats_QueryPictFormatsReply
-        <$> (queryPictFormats dpy >>= getReply')
-
-findScreenFormats :: Connection -> IO [PICTFORMAT]
-findScreenFormats dpy = map format_PICTVISUAL <$> findScreenPictVisuals dpy
-
-findScreenPictVisuals :: Connection -> IO [PICTVISUAL]
-findScreenPictVisuals dpy =
-    concatMap visuals_PICTDEPTH . depths_PICTSCREEN
-    . (!! (screen $ displayInfo dpy)) . screens_QueryPictFormatsReply
-    <$> (queryPictFormats dpy >>= getReply')
-
-getWindowOpacity :: Connection -> WINDOW -> IO Double
-getWindowOpacity dpy win = do
-    cardinalAtom <- getAtom dpy "CARDINAL" True
-    opacityAtom <- getAtom dpy "_NET_WM_WINDOW_OPACITY" False
-
-    val <- value_GetPropertyReply <$> ((getProperty dpy $ MkGetProperty
-        { delete_GetProperty = False
-        , window_GetProperty = win
-        , property_GetProperty = opacityAtom
-        , type_GetProperty = cardinalAtom
-        , long_offset_GetProperty = 0
-        , long_length_GetProperty = 1
-        }) >>= getReply')
-    return $! if null val
-        then 1.0
-        else fromIntegral (head val) / fromIntegral maxOpacity
-  where
-    maxOpacity :: Int
-    maxOpacity = 0xff
-
-createBuffer :: Connection -> DRAWABLE -> (Word16, Word16) -> Word8
-             -> PICTFORMAT -> IO PICTURE
-createBuffer dpy draw (w, h) depth format = do
-    pixmap <- newResource dpy
-    createPixmap dpy $! MkCreatePixmap depth pixmap draw w h
-
-    picture <- newResource dpy
-    createPicture dpy $ MkCreatePicture
-        { pid_CreatePicture = picture
-        , drawable_CreatePicture = toDrawable pixmap
-        , format_CreatePicture = format
-        , value_CreatePicture = toValueParam
-            [(CPRepeat, toValue RepeatNormal)]
-        }
-
-    freePixmap dpy pixmap
-    return picture
-
-getRootPixmap :: Connection -> WINDOW -> IO (Maybe PIXMAP)
-getRootPixmap dpy rootWindow = do
-    rootPixmapAtom <- getAtom dpy "_XROOTPMAP_ID" False
-    pixmapAtom <- getAtom dpy "PIXMAP" True
-
-    pixmapIdBytes <- value_GetPropertyReply
-        <$> ((getProperty dpy $! MkGetProperty
-            { delete_GetProperty = False
-            , window_GetProperty = rootWindow
-            , property_GetProperty = rootPixmapAtom
-            , type_GetProperty = pixmapAtom
-            , long_offset_GetProperty = 0
-            , long_length_GetProperty = 4
-            }) >>= getReply')
-    let shifts = map (* 8) [0..3]
-        pixmapIdWords = zipWith shiftL (map fromIntegral pixmapIdBytes) shifts
-        pixmapId :: Word32
-        pixmapId = sum pixmapIdWords
-    return $! if null pixmapIdBytes
-        then Nothing
-        else Just $! fromXid $! toXid pixmapId
 
 
 -- Event Utilities ------------------------------------------------------
@@ -542,69 +360,3 @@ discardWindow win = do
     damageWholeWindow win
     freeWindow win
     withWindows $ S.filter ((/= winId win) . winId)
-
-
--- Utilities ------------------------------------------------------------
-
-getAtom :: Connection -> String -> Bool -> IO ATOM
-getAtom dpy name onlyIfExists =
-    (internAtom dpy $! MkInternAtom
-        { only_if_exists_InternAtom = onlyIfExists
-        , name_len_InternAtom = fromIntegral $! length cname
-        , name_InternAtom = cname
-        }
-    ) >>= getReply'
-  where
-    cname = stringToCList name
-
-getReply' :: Receipt a -> IO a
-getReply' rcpt = do
-    reply <- getReply rcpt
-    case reply of
-        Left err -> error $ show err
-        Right a -> return a
-
-data HollyState = HollyState
-    { wins  :: Seq Win
-    , display   :: Connection
-    , root  :: WINDOW
-    , scr   :: SCREEN
-    , rootW :: Word16
-    , rootH :: Word16
-    , rootFormat :: PICTFORMAT
-    , overlayPicture :: PICTURE
-    , overlayWindow :: WINDOW
-    , bufferPicture :: PICTURE
-    , extraRepaint  :: REGION
-    }
-
-data Win = Win
-    { winId :: WINDOW
-    , winX  :: Int16
-    , winY  :: Int16
-    , winW  :: Word16
-    , winH  :: Word16
-    , winB  :: Word16
-    , winFormat :: PICTFORMAT
-    , winOpacity :: Double
-    , winDamage :: Damage.DAMAGE
-    , winPicture    :: PICTURE
-    }
-  deriving (Eq, Show)
-
-class XidLike d => Drawable d where
-    toDrawable :: d -> DRAWABLE
-    toDrawable = fromXid . toXid
-
-instance Drawable PIXMAP
-
-instance Drawable WINDOW
-
-instance Eq MapState where
-    a == b = toValue a == (toValue b :: Integer)
-
-instance Eq PictType where
-    a == b = toValue a == (toValue b :: Integer)
-
-instance Eq WindowClass where
-    a == b = toValue a == (toValue b :: Integer)

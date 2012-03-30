@@ -16,7 +16,10 @@ cabal-version:       >=1.8
 
 executable holly
   main-is:             holly.hs
-  -- other-modules:       
+  other-modules:       Holly.Drawable,
+                       Holly.Missing,
+                       Holly.Paint,
+                       Holly.Types
   ghc-options:         -Wall
   build-depends:       base,
                        containers >= 0.4 && < 0.6,
