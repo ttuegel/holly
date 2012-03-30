@@ -1,0 +1,6 @@
+Save window pixmaps for unmapped windows to repaint faster.
+Switch to a plugin-based architecture.
+Implement a repainting deadline to reduce lag.
+Use window shapes for repainting.
+Don't reallocate on configure events if unnecessary.
+Inhibit drawing under solid windows.
