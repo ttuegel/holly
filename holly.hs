@@ -190,7 +190,6 @@ paint :: Connection -> HollyState -> IO ()
 paint dpy holly = do
     let overlay = overlayPicture holly
         buffer = bufferPicture holly
-        solidWindows = S.filter ((> 0.98) . winOpacity) $ wins holly
 
     let overlayDamage = extraRepaint holly
         applyWindowDamage win = do
