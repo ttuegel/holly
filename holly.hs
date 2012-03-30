@@ -86,9 +86,6 @@ init dpy = do
          )]
     selectInput dpy r True
 
-    children <- children_QueryTreeReply <$> (queryTree dpy r >>= getReply')
-    ws <- catMaybes <$> mapM (getWindow dpy) children
-
     let w = width_GetGeometryReply geom
         h = height_GetGeometryReply geom
     bufferFormat <- findStandardFormat dpy True
@@ -97,18 +94,24 @@ init dpy = do
     extra <- newResource dpy
     createRegion dpy extra [ MkRECTANGLE 0 0 w h ]
 
-    return $! HollyState
-        { wins = S.fromList $! ws
-        , scr = s
-        , root = r
-        , rootW = w
-        , rootH = h
-        , rootFormat = rootF
-        , overlayPicture = overlayP
-        , overlayWindow = overlayW
-        , bufferPicture = buffer
-        , extraRepaint = extra
-        }
+    children <- children_QueryTreeReply <$> (queryTree dpy r >>= getReply')
+
+    let hs = HollyState
+            { wins = S.empty
+            , scr = s
+            , root = r
+            , rootW = w
+            , rootH = h
+            , rootFormat = rootF
+            , overlayPicture = overlayP
+            , overlayWindow = overlayW
+            , bufferPicture = buffer
+            , extraRepaint = extra
+            }
+
+    flip execStateT hs $ do
+        ws <- catMaybes <$> mapM (getWindow dpy) children
+        withWindows $ const $ S.fromList ws
 
 checkExtensions :: Connection -> IO ()
 checkExtensions dpy = do
@@ -236,7 +239,7 @@ paint dpy holly = do
 
 createNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
 createNotifyHandler dpy = guarded $ \ev -> do
-    mWin <- liftIO $ getWindow dpy $ window_CreateNotifyEvent ev
+    mWin <- getWindow dpy $ window_CreateNotifyEvent ev
     case mWin of
         Nothing -> return ()
         Just win -> withWindows (S.|> win)
@@ -246,7 +249,7 @@ configureNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
         abv = above_sibling_ConfigureNotifyEvent ev
     findWindow wid $ discardWindow dpy
-    mNew <- liftIO $ getWindow dpy wid
+    mNew <- getWindow dpy wid
     case mNew of
         Nothing -> return ()
         Just new -> withWindows $ \ws ->
@@ -263,7 +266,7 @@ unmapNotifyHandler dpy = guarded $ \ev ->
 
 mapNotifyHandler :: Connection -> SomeEvent -> StateT HollyState IO ()
 mapNotifyHandler dpy = guarded $ \ev -> do
-    mWin <- liftIO $ getWindow dpy $ window_MapNotifyEvent ev
+    mWin <- getWindow dpy $ window_MapNotifyEvent ev
     case mWin of
         Nothing -> return ()
         Just win -> withWindows (S.|> win)
@@ -273,7 +276,7 @@ reparentNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
     rootWindow <- gets root
     if parent_ReparentNotifyEvent ev == rootWindow
-        then liftIO (getWindow dpy wid)
+        then getWindow dpy wid
             >>= maybe (return ()) (\win -> withWindows (win S.<|))
         else findWindow wid $ discardWindow dpy
 
@@ -299,7 +302,7 @@ propertyNotifyHandler dpy = guarded $ \ev -> do
             newOpacity <- liftIO $ getWindowOpacity dpy wid
             findWindowIx wid $ \ix -> do
                 win <- gets $ flip S.index ix . wins
-                liftIO $ damageWholeWindow dpy win
+                damageWholeWindow dpy win
                 withWindows $ S.update ix $ win { winOpacity = newOpacity }
         else return ()
 
@@ -463,75 +466,68 @@ freeWindow dpy win = liftIO $ do
 withWindows :: (Seq Win -> Seq Win) -> StateT HollyState IO ()
 withWindows f = modify $ \s -> s { wins = f (wins s) }
 
-getWindow :: Connection -> WINDOW -> IO (Maybe Win)
+getWindow :: Connection -> WINDOW -> StateT HollyState IO (Maybe Win)
 getWindow dpy wid = do
-    attrs <- getWindowAttributes dpy wid >>= getReply'
+    attrs <- liftIO $ getWindowAttributes dpy wid >>= getReply'
     if (inputOnly attrs || not (viewable attrs))
         then return Nothing
         else do
-            geom <- getGeometry dpy (toDrawable wid) >>= getReply'
-            opacity <- getWindowOpacity dpy wid
-            fmt <- findVisualFormat dpy $ visual_GetWindowAttributesReply attrs
-            changeWindowAttributes dpy wid $! toValueParam
-                [(CWEventMask, toMask [ EventMaskPropertyChange ])]
-            dam <- newResource dpy
-            Damage.create dpy $! Damage.MkCreate
-                { Damage.damage_Create = dam
-                , Damage.drawable_Create = toDrawable wid
-                , Damage.level_Create = Damage.ReportLevelNonEmpty
-                }
-            pixmap <- newResource dpy
-            nameWindowPixmap dpy wid pixmap
-            pict <- newResource dpy
-            createPicture dpy $ MkCreatePicture
-                { pid_CreatePicture = pict
-                , drawable_CreatePicture = toDrawable pixmap
-                , format_CreatePicture = fmt
-                , value_CreatePicture = toValueParam
-                    [( CPSubwindowMode
-                     , toValue SubwindowModeIncludeInferiors
-                     )]
-                }
-            freePixmap dpy pixmap
-            let win = Win
-                    { winX = x_GetGeometryReply geom
-                    , winY = y_GetGeometryReply geom
-                    , winW = width_GetGeometryReply geom
-                    , winH = height_GetGeometryReply geom
-                    , winB = border_width_GetGeometryReply geom
-                    , winId = wid
-                    , winFormat = fmt
-                    , winOpacity = opacity
-                    , winDamage = dam
-                    , winPicture = pict
-                    }
+            win <- liftIO $ do
+                        geom <- getGeometry dpy (toDrawable wid) >>= getReply'
+                        opacity <- getWindowOpacity dpy wid
+                        fmt <- findVisualFormat dpy $ visual_GetWindowAttributesReply attrs
+                        changeWindowAttributes dpy wid $! toValueParam
+                            [(CWEventMask, toMask [ EventMaskPropertyChange ])]
+                        dam <- newResource dpy
+                        Damage.create dpy $! Damage.MkCreate
+                            { Damage.damage_Create = dam
+                            , Damage.drawable_Create = toDrawable wid
+                            , Damage.level_Create = Damage.ReportLevelNonEmpty
+                            }
+                        pixmap <- newResource dpy
+                        nameWindowPixmap dpy wid pixmap
+                        pict <- newResource dpy
+                        createPicture dpy $ MkCreatePicture
+                            { pid_CreatePicture = pict
+                            , drawable_CreatePicture = toDrawable pixmap
+                            , format_CreatePicture = fmt
+                            , value_CreatePicture = toValueParam
+                                [( CPSubwindowMode
+                                 , toValue SubwindowModeIncludeInferiors
+                                 )]
+                            }
+                        freePixmap dpy pixmap
+                        return $! Win
+                                { winX = x_GetGeometryReply geom
+                                , winY = y_GetGeometryReply geom
+                                , winW = width_GetGeometryReply geom
+                                , winH = height_GetGeometryReply geom
+                                , winB = border_width_GetGeometryReply geom
+                                , winId = wid
+                                , winFormat = fmt
+                                , winOpacity = opacity
+                                , winDamage = dam
+                                , winPicture = pict
+                                }
             damageWholeWindow dpy win
             return $! Just $! win
   where
     viewable = (== MapStateViewable) . map_state_GetWindowAttributesReply
     inputOnly = (== WindowClassInputOnly) . class_GetWindowAttributesReply
 
-damageWholeWindow :: Connection -> Win -> IO ()
+damageWholeWindow :: Connection -> Win -> StateT HollyState IO ()
 damageWholeWindow dpy win = do
-    region <- newResource dpy
-    createRegion dpy region [ MkRECTANGLE 0 0 (winW win) (winH win) ]
-    Damage.add dpy (toDrawable $ winId win) region
-    destroyRegion dpy region
+    extra <- gets extraRepaint
+    liftIO $ do
+        region <- newResource dpy
+        createRegion dpy region
+            [ MkRECTANGLE (winX win) (winY win) (winW win) (winH win) ]
+        unionRegion dpy $! MkUnionRegion region extra extra
+        destroyRegion dpy region
 
 discardWindow :: Connection -> Win -> StateT HollyState IO ()
 discardWindow dpy win = do
-    extra <- gets extraRepaint
-    let x = winX win
-        y = winY win
-        w = winW win
-        h = winH win
-        b = winB win
-    liftIO $ do
-        winRegion <- newResource dpy
-        createRegion dpy winRegion
-            [ MkRECTANGLE x y (w + b + b) (h + b + b) ]
-        unionRegion dpy $! MkUnionRegion winRegion extra extra
-        destroyRegion dpy winRegion
+    damageWholeWindow dpy win
     freeWindow dpy win
     withWindows $ S.filter ((/= winId win) . winId)
 
