@@ -19,6 +19,6 @@ executable holly
   -- other-modules:       
   ghc-options:         -Wall
   build-depends:       base,
-                       containers == 0.4.*,
-                       transformers == 0.2.*,
+                       containers >= 0.4 && < 0.6,
+                       transformers >= 0.2 && < 0.4,
                        xhb
