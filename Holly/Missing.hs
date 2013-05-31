@@ -105,3 +105,4 @@ instance Eq PictType where
 
 instance Eq WindowClass where
     a == b = toValue a == (toValue b :: Integer)
+
