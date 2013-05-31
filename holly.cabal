@@ -3,9 +3,9 @@
 
 name:                holly
 version:             0.1.0.0
-synopsis:            A compositor for X
+synopsis:            Compositor for X11
 -- description:         
-license:             BSD3
+license:             MIT
 license-file:        LICENSE
 author:              Thomas Tuegel <ttuegel@gmail.com>
 maintainer:          ttuegel@gmail.com
