@@ -1,7 +1,7 @@
 {-# LANGUAGE BangPatterns, NoImplicitPrelude, OverloadedStrings #-}
 module Main where
 
-import Control.Concurrent ( forkIO )
+import Control.Concurrent.Async
 import Control.Monad.IO.Class
 import CustomPrelude hiding ( init )
 import qualified Data.Sequence as S
@@ -42,17 +42,18 @@ import Holly.XHB
 main :: IO ()
 main = do
     dpy <- maybe (error "Could not open display!") id <$> connect
-    errorHandler dpy
+    errThread <- async $ errorHandler dpy
     errorsFatal $ checkExtensions dpy
     initState <- errorsFatal $ init dpy
-    evalStateT (errorsFatal $ eventHandler dpy) initState
+    mainThread <- async $ evalStateT (errorsFatal $ eventHandler dpy) initState
+    void $ waitAny [ errThread, mainThread ]
   where
     errorsFatal :: MonadIO m => EitherT SomeError m a -> m a
     errorsFatal = eitherT (liftIO . error . show) return
 
 errorHandler :: Connection -> IO ()
 errorHandler dpy =
-    void $ forkIO $ forever $ waitForError dpy >>= putStrLn . show
+    void $ forever $ waitForError dpy >>= putStrLn . show
 
 init :: Connection -> EitherT SomeError IO HollyState
 init dpy = do
