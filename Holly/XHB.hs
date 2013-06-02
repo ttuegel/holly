@@ -56,9 +56,6 @@ findStandardFormat dpy argb = do
             $ filter ((== PictTypeDirect) . type_PICTFORMINFO)
             $ formats_QueryPictFormatsReply pictFormats
 
-findScreenFormats :: MonadIO m => Connection -> EitherT SomeError m [PICTFORMAT]
-findScreenFormats dpy = map format_PICTVISUAL <$> findScreenPictVisuals dpy
-
 findScreenPictVisuals :: MonadIO m => Connection -> EitherT SomeError m [PICTVISUAL]
 findScreenPictVisuals dpy = do
     pictFormats <- liftIO (queryPictFormats dpy) >>= getReply
