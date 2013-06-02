@@ -11,15 +11,13 @@ import Prelude hiding ( mapM, mapM_ )
 
 import Control.Error
 
-import Graphics.XHB hiding ( getReply )
 import qualified Graphics.XHB.Gen.Damage as Damage
 import Graphics.XHB.Gen.Damage ( Subtract(..) )
 import Graphics.XHB.Gen.Render
 import Graphics.XHB.Gen.XFixes
 
-import Holly.Drawable
-import Holly.Missing
 import Holly.Types
+import Holly.XHB
 
 paint :: MainLoop ()
 paint = do

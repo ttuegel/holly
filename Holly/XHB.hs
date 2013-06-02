@@ -1,25 +1,31 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-module Holly.Missing
-    ( createBuffer
+module Holly.XHB
+    ( Drawable(..)
+    , createBuffer
     , findStandardFormat
     , findVisualFormat
     , getAtom
     , getReply
     , getWindowOpacity
+    , module Graphics.XHB
     ) where
 
 import Control.Applicative ( (<$>) )
-import Control.Monad.IO.Class
-
 import Control.Error
-
-import qualified Graphics.XHB as X
+import Control.Monad.IO.Class
+import Data.Word
 import Graphics.XHB hiding ( getReply )
+import qualified Graphics.XHB as X
 import Graphics.XHB.Connection.Open ( screen )
 import Graphics.XHB.Gen.Render
 
-import Holly.Drawable
-import Holly.Types
+class XidLike d => Drawable d where
+    toDrawable :: d -> DRAWABLE
+    toDrawable = fromXid . toXid
+
+instance Drawable PIXMAP
+
+instance Drawable WINDOW
 
 getReply :: MonadIO m => Receipt a -> EitherT SomeError m a
 getReply receipt = liftIO (X.getReply receipt) >>= hoistEither

@@ -11,7 +11,6 @@ import Data.Sequence ( Seq )
 import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
 
-import Graphics.XHB hiding ( getReply )
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension
     , queryVersion
@@ -41,10 +40,9 @@ import qualified Graphics.XHB.Gen.XFixes as XFixes
 import Graphics.XHB.Gen.XFixes
 import Prelude hiding ( init, mapM, mapM_ )
 
-import Holly.Drawable
-import Holly.Missing
 import Holly.Paint
 import Holly.Types
+import Holly.XHB
 
 -- Main Loop ------------------------------------------------------------
 
