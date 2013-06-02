@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 module Holly.XHB
     ( Drawable(..)
     , createBuffer
@@ -10,9 +11,9 @@ module Holly.XHB
     , module Graphics.XHB
     ) where
 
-import Control.Applicative ( (<$>) )
 import Control.Error
 import Control.Monad.IO.Class
+import CustomPrelude
 import Data.Word
 import Graphics.XHB hiding ( getReply )
 import qualified Graphics.XHB as X

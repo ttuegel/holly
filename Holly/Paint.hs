@@ -1,16 +1,11 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE NoImplicitPrelude, OverloadedStrings #-}
 module Holly.Paint
     ( paint
     ) where
 
-import Control.Monad ( void )
-import Control.Monad.IO.Class
-import Data.Bits ( shiftL )
-import Data.Foldable ( mapM_ )
-import Prelude hiding ( mapM, mapM_ )
-
 import Control.Error
-
+import CustomPrelude
+import Data.Bits ( shiftL )
 import qualified Graphics.XHB.Gen.Damage as Damage
 import Graphics.XHB.Gen.Damage ( Subtract(..) )
 import Graphics.XHB.Gen.Render

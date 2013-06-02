@@ -1,16 +1,11 @@
-{-# LANGUAGE BangPatterns, OverloadedStrings #-}
+{-# LANGUAGE BangPatterns, NoImplicitPrelude, OverloadedStrings #-}
 module Main where
 
-import Control.Applicative ( (<$>) )
 import Control.Concurrent ( forkIO )
-import Control.Monad ( forever, unless, void, when )
 import Control.Monad.IO.Class
-import Data.Foldable ( mapM_ )
+import CustomPrelude hiding ( init )
 import Data.Maybe ( fromJust )
-import Data.Sequence ( Seq )
-import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
-
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension
     , queryVersion
@@ -38,7 +33,6 @@ import qualified Graphics.XHB.Gen.XFixes as XFixes
     , QueryVersionReply(..)
     )
 import Graphics.XHB.Gen.XFixes
-import Prelude hiding ( init, mapM, mapM_ )
 
 import Holly.Paint
 import Holly.Types
@@ -207,14 +201,14 @@ createNotifyHandler, configureNotifyHandler, destroyNotifyHandler,
 createNotifyHandler = guarded $ \ev ->
     void $ lift $ runMaybeT
         $ getWindow (window_CreateNotifyEvent ev) >>= appendWindow
-  where appendWindow win = lift $ withWindows (S.|> win)
+  where appendWindow win = lift $ withWindows (|> win)
 
 configureNotifyHandler = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
         abv = above_sibling_ConfigureNotifyEvent ev
         arrangeWindows new = lift $ withWindows $ \ws ->
             let (above, below) = S.spanr ((/= abv) . winId) ws
-            in below S.>< (new S.<| above)
+            in below >< (new <| above)
     lift $ findWindow wid discardWindow
     void $ lift $ runMaybeT $ getWindow wid >>= arrangeWindows
 
@@ -226,11 +220,11 @@ unmapNotifyHandler = guarded $ \ev ->
 
 mapNotifyHandler = guarded $ \ev ->
     void $ lift $ runMaybeT $ getWindow (window_MapNotifyEvent ev) >>= mapWindow'
-  where mapWindow' win = lift $ withWindows (S.|> win)
+  where mapWindow' win = lift $ withWindows (|> win)
 
 reparentNotifyHandler = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
-        prependWindow win = lift $ withWindows (win S.<|)
+        prependWindow win = lift $ withWindows (win <|)
     rootWindow <- lift $ gets root
     if parent_ReparentNotifyEvent ev == rootWindow
         then void $ lift $ runMaybeT $ getWindow wid >>= prependWindow
@@ -243,8 +237,8 @@ circulateNotifyHandler = guarded $ \ev -> do
             circulate wIx =
                 let win = S.index ws wIx
                 in case place_CirculateNotifyEvent ev of
-                    PlaceOnBottom -> win S.<| ws'
-                    PlaceOnTop -> ws' S.|> win
+                    PlaceOnBottom -> win <| ws'
+                    PlaceOnTop -> ws' |> win
         maybe ws circulate $ S.findIndexL ((== wid) . winId) ws
 
 propertyNotifyHandler = guarded $ \ev -> do

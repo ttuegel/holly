@@ -13,11 +13,13 @@ cabal-version:  >=1.8
 
 executable holly
     main-is:        holly.hs
-    other-modules:  Holly.Paint,
+    other-modules:  CustomPrelude,
+                    Holly.Paint,
                     Holly.Types,
                     Holly.XHB
     ghc-options:    -Wall
     build-depends:  base,
+                    prelude-prime == 0.1.*,
                     containers >= 0.4 && < 0.6,
                     errors == 1.4.*,
                     transformers >= 0.2 && < 0.4,
