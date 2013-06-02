@@ -1,13 +1,23 @@
 module Holly.Types
-    ( HollyState(..)
+    ( EventHandler
+    , HollyState(..)
+    , MainLoop
     , Win(..)
     , module Data.Int
     , module Data.Word
+    , module Control.Error
+    , module Control.Monad.Trans.Class
+    , module Control.Monad.Trans.State
     ) where
 
 import Data.Int
 import Data.Sequence ( Seq )
 import Data.Word
+
+import Control.Error
+import Control.Monad.Trans.Class
+import Control.Monad.Trans.State hiding
+    ( liftCallCC, liftCatch, liftListen, liftPass )
 
 import Graphics.XHB
 import Graphics.XHB.Gen.Damage ( DAMAGE )
@@ -41,3 +51,7 @@ data Win = Win
     , winPicture :: PICTURE
     }
   deriving (Eq, Show)
+
+type MainLoop a = EitherT SomeError (StateT HollyState IO) a
+type EventHandler = SomeEvent -> MainLoop ()
+

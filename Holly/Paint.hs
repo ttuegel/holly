@@ -1,14 +1,17 @@
+{-# LANGUAGE OverloadedStrings #-}
 module Holly.Paint
     ( paint
     ) where
 
-import Control.Applicative ( (<$>) )
+import Control.Monad ( void )
+import Control.Monad.IO.Class
 import Data.Bits ( shiftL )
 import Data.Foldable ( mapM_ )
-import Data.Maybe ( isJust )
 import Prelude hiding ( mapM, mapM_ )
 
-import Graphics.XHB
+import Control.Error
+
+import Graphics.XHB hiding ( getReply )
 import qualified Graphics.XHB.Gen.Damage as Damage
 import Graphics.XHB.Gen.Damage ( Subtract(..) )
 import Graphics.XHB.Gen.Render
@@ -18,12 +21,14 @@ import Holly.Drawable
 import Holly.Missing
 import Holly.Types
 
-paint :: Connection -> HollyState -> IO ()
-paint dpy holly = do
-    let overlay               = overlayPicture holly
-        buffer                = bufferPicture holly
-        overlayDamage         = extraRepaint holly
-        overlayWindowDrawable = toDrawable $ overlayWindow holly
+paint :: MainLoop ()
+paint = do
+    holly <- lift get
+    dpy <- lift $ gets display
+    overlay <- lift $ gets overlayPicture
+    buffer <- lift $ gets bufferPicture
+    overlayDamage <- lift $ gets extraRepaint
+    let overlayWindowDrawable = toDrawable $ overlayWindow holly
 
     let getWindowDamage win = do
             damaged <- newResource dpy
@@ -67,25 +72,26 @@ paint dpy holly = do
             , height_Composite = 0
             }
 
-    -- Accumulate damage to all windows.
-    mapM_ getWindowDamage $ wins holly
-    -- Clip buffer and overlay to avoid repainting undamaged regions.
-    setPictureClipRegion dpy MkSetPictureClipRegion
-        { picture_SetPictureClipRegion  = buffer
-        , region_SetPictureClipRegion   = overlayDamage
-        , x_origin_SetPictureClipRegion = 0
-        , y_origin_SetPictureClipRegion = 0
-        }
-    setPictureClipRegion dpy MkSetPictureClipRegion
-        { picture_SetPictureClipRegion  = overlay
-        , region_SetPictureClipRegion   = overlayDamage
-        , x_origin_SetPictureClipRegion = 0
-        , y_origin_SetPictureClipRegion = 0
-        }
-    -- Reset damage.
-    setRegion dpy overlayDamage []
+    liftIO $ do
+        -- Accumulate damage to all windows.
+        mapM_ getWindowDamage $ wins holly
+        -- Clip buffer and overlay to avoid repainting undamaged regions.
+        setPictureClipRegion dpy MkSetPictureClipRegion
+            { picture_SetPictureClipRegion  = buffer
+            , region_SetPictureClipRegion   = overlayDamage
+            , x_origin_SetPictureClipRegion = 0
+            , y_origin_SetPictureClipRegion = 0
+            }
+        setPictureClipRegion dpy MkSetPictureClipRegion
+            { picture_SetPictureClipRegion  = overlay
+            , region_SetPictureClipRegion   = overlayDamage
+            , x_origin_SetPictureClipRegion = 0
+            , y_origin_SetPictureClipRegion = 0
+            }
+        -- Reset damage.
+        setRegion dpy overlayDamage []
 
-    let paintRootPixmap rootPixmap = do
+    let paintRootPixmap rootPixmap = liftIO $ do
             rootPicture <- newResource dpy
             createPicture dpy MkCreatePicture
                 { pid_CreatePicture      = rootPicture
@@ -104,23 +110,25 @@ paint dpy holly = do
         draw win = do
             mask <- solidPicture dpy overlayWindowDrawable
                 (winOpacity win) Nothing
-            composite dpy simpleComposite
-                { op_Composite     = PictOpOver
-                , src_Composite    = winPicture win
-                , mask_Composite   = mask
-                , dst_x_Composite  = winX win
-                , dst_y_Composite  = winY win
-                , width_Composite  = winW win + (2 * winB win)
-                , height_Composite = winH win + (2 * winB win)
-                }
-            freePicture dpy mask
+            liftIO $ do
+                composite dpy simpleComposite
+                    { op_Composite     = PictOpOver
+                    , src_Composite    = winPicture win
+                    , mask_Composite   = mask
+                    , dst_x_Composite  = winX win
+                    , dst_y_Composite  = winY win
+                    , width_Composite  = winW win + (2 * winB win)
+                    , height_Composite = winH win + (2 * winB win)
+                    }
+                freePicture dpy mask
 
     -- Paint to the buffer.
-    getRootPixmap dpy (root holly) >>= mapM_ paintRootPixmap
+    void $ liftIO $ runMaybeT
+        $ getRootPixmap dpy (root holly) >>= paintRootPixmap
     mapM_ draw $ wins holly
 
     -- Copy the buffer to the overlay window.
-    composite dpy simpleComposite
+    liftIO $ composite dpy simpleComposite
         { src_Composite    = buffer
         , dst_Composite    = overlay
         , width_Composite  = rootW holly
@@ -130,52 +138,55 @@ paint dpy holly = do
 -- Painting Utilities ---------------------------------------------------
 
 -- | Paint a 1px by 1px `PICTURE` of a solid color.
-solidPicture :: Connection -> DRAWABLE -> Double
-             -> Maybe (Double, Double, Double) -> IO PICTURE
+solidPicture :: MonadIO m => Connection -> DRAWABLE -> Double
+             -> Maybe (Double, Double, Double) -> EitherT SomeError m PICTURE
 solidPicture dpy draw a mRGB = do
     format <- findStandardFormat dpy (isJust mRGB)
     let depth | isJust mRGB = 32
               | otherwise   = 8
-    picture <- createBuffer dpy draw (1, 1) depth format
+    liftIO $ do
+        picture <- createBuffer dpy draw (1, 1) depth format
 
-    let r = maybe 0.0 (\(x, _, _) -> x) mRGB
-        g = maybe 0.0 (\(_, x, _) -> x) mRGB
-        b = maybe 0.0 (\(_, _, x) -> x) mRGB
-    fillRectangles dpy $ MkFillRectangles
-        { op_FillRectangles    = PictOpSrc
-        , dst_FillRectangles   = picture
-        , color_FillRectangles = MkCOLOR
-            { red_COLOR   = round $ r * 0xffff
-            , green_COLOR = round $ g * 0xffff
-            , blue_COLOR  = round $ b * 0xffff
-            , alpha_COLOR = round $ a * 0xffff
+        let r = maybe 0.0 (\(x, _, _) -> x) mRGB
+            g = maybe 0.0 (\(_, x, _) -> x) mRGB
+            b = maybe 0.0 (\(_, _, x) -> x) mRGB
+        fillRectangles dpy $ MkFillRectangles
+            { op_FillRectangles    = PictOpSrc
+            , dst_FillRectangles   = picture
+            , color_FillRectangles = MkCOLOR
+                { red_COLOR   = round $ r * 0xffff
+                , green_COLOR = round $ g * 0xffff
+                , blue_COLOR  = round $ b * 0xffff
+                , alpha_COLOR = round $ a * 0xffff
+                }
+            , rects_FillRectangles = [ MkRECTANGLE 0 0 1 1 ]
             }
-        , rects_FillRectangles = [ MkRECTANGLE 0 0 1 1 ]
-        }
 
-    return picture
+        return picture
 
-getRootPixmap :: Connection -> WINDOW -> IO (Maybe PIXMAP)
-getRootPixmap dpy rootWindow = do
+getRootPixmap :: MonadIO m => Connection -> WINDOW -> MaybeT m PIXMAP
+getRootPixmap dpy rootWindow = hushT $ do
     rootPixmapAtom <- getAtom dpy "_XROOTPMAP_ID" False
     pixmapAtom <- getAtom dpy "PIXMAP" True
 
-    pixmapIdBytes <- value_GetPropertyReply
-        <$> ((getProperty dpy MkGetProperty
+    let propRequest = getProperty dpy MkGetProperty
             { delete_GetProperty      = False
             , window_GetProperty      = rootWindow
             , property_GetProperty    = rootPixmapAtom
             , type_GetProperty        = pixmapAtom
             , long_offset_GetProperty = 0
             , long_length_GetProperty = 4
-            }) >>= getReply')
-    let shifts = map (* 8) [0..3]
+            }
+    propReply <- liftIO propRequest >>= getReply
+    let pixmapIdBytes = value_GetPropertyReply propReply
+        shifts = map (* 8) [0..3]
         pixmapIdWords = zipWith shiftL (map fromIntegral pixmapIdBytes) shifts
         pixmapId :: Word32
         pixmapId = sum pixmapIdWords
-    return $! if null pixmapIdBytes
-        then Nothing
-        else Just $! fromXid $! toXid pixmapId
+
+    if null pixmapIdBytes
+        then left $ toError $ UnknownError "No root pixmap!"
+        else right $ fromXid $ toXid pixmapId
 
 pictNone :: PICTURE
 pictNone = fromXid xidNone

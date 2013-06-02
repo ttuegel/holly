@@ -1,18 +1,17 @@
-{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE BangPatterns, OverloadedStrings #-}
 module Main where
 
 import Control.Applicative ( (<$>) )
 import Control.Concurrent ( forkIO )
 import Control.Monad ( forever, unless, void, when )
 import Control.Monad.IO.Class
-import Control.Monad.Trans.State
 import Data.Foldable ( mapM_ )
-import Data.Maybe ( catMaybes, fromJust, isJust )
+import Data.Maybe ( fromJust )
 import Data.Sequence ( Seq )
 import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
 
-import Graphics.XHB
+import Graphics.XHB hiding ( getReply )
 import qualified Graphics.XHB.Gen.Composite as Composite
     ( extension
     , queryVersion
@@ -53,63 +52,67 @@ main :: IO ()
 main = do
     dpy <- maybe (error "Could not open display!") id <$> connect
     errorHandler dpy
-    checkExtensions dpy
-    init dpy >>= evalStateT (eventHandler dpy)
+    errorsFatal $ checkExtensions dpy
+    initState <- errorsFatal $ init dpy
+    evalStateT (errorsFatal $ eventHandler dpy) initState
+  where
+    errorsFatal :: MonadIO m => EitherT SomeError m a -> m a
+    errorsFatal = eitherT (liftIO . error . show) return
 
 errorHandler :: Connection -> IO ()
-errorHandler dpy = void $ forkIO $ do
-    forever $ do
-        err <- waitForError dpy
-        putStrLn $ show err
+errorHandler dpy =
+    void $ forkIO $ forever $ waitForError dpy >>= putStrLn . show
 
-init :: Connection -> IO HollyState
+init :: Connection -> EitherT SomeError IO HollyState
 init dpy = do
     let scrNum = screen $ displayInfo dpy
         s = (!! scrNum) $ roots_Setup $ connectionSetup dpy
         r = root_SCREEN s
-    geom <- getGeometry dpy (toDrawable r) >>= getReply'
-    redirectSubwindows dpy r RedirectAutomatic
+    geom <- liftIO (getGeometry dpy $ toDrawable r) >>= getReply
+    liftIO $ redirectSubwindows dpy r RedirectAutomatic
     let rootVisual = root_visual_SCREEN s
     rootF <- findVisualFormat dpy rootVisual
 
-    overlayW <- getOverlayWindow dpy r >>= getReply'
-    overlayP <- newResource dpy
-    createPicture dpy MkCreatePicture
-        { pid_CreatePicture      = overlayP
-        , drawable_CreatePicture = toDrawable overlayW
-        , format_CreatePicture   = rootF
-        , value_CreatePicture    = toValueParam
-            [(CPSubwindowMode, toValue SubwindowModeIncludeInferiors)]
-        }
-    rectangles dpy MkRectangles
-        { operation_Rectangles          = SOSet
-        , destination_kind_Rectangles   = SKInput
-        , ordering_Rectangles           = ClipOrderingUnsorted
-        , destination_window_Rectangles = overlayW
-        , x_offset_Rectangles           = 0
-        , y_offset_Rectangles           = 0
-        , rectangles_Rectangles         = []
-        }
+    overlayW <- liftIO (getOverlayWindow dpy r) >>= getReply
+    overlayP <- liftIO $ newResource dpy
+    liftIO $ do
+        createPicture dpy MkCreatePicture
+            { pid_CreatePicture      = overlayP
+            , drawable_CreatePicture = toDrawable overlayW
+            , format_CreatePicture   = rootF
+            , value_CreatePicture    = toValueParam
+                [(CPSubwindowMode, toValue SubwindowModeIncludeInferiors)]
+            }
+        rectangles dpy MkRectangles
+            { operation_Rectangles          = SOSet
+            , destination_kind_Rectangles   = SKInput
+            , ordering_Rectangles           = ClipOrderingUnsorted
+            , destination_window_Rectangles = overlayW
+            , x_offset_Rectangles           = 0
+            , y_offset_Rectangles           = 0
+            , rectangles_Rectangles         = []
+            }
 
-    changeWindowAttributes dpy r $! toValueParam
-        [(CWEventMask, toMask
-            [ EventMaskSubstructureNotify
-            , EventMaskExposure
-            , EventMaskStructureNotify
-            , EventMaskPropertyChange
-            ]
-         )]
-    selectInput dpy r True
+        changeWindowAttributes dpy r $! toValueParam
+            [(CWEventMask, toMask
+                [ EventMaskSubstructureNotify
+                , EventMaskExposure
+                , EventMaskStructureNotify
+                , EventMaskPropertyChange
+                ]
+             )]
+        selectInput dpy r True
 
     let w = width_GetGeometryReply geom
         h = height_GetGeometryReply geom
-    bufferFormat <- findStandardFormat dpy True
-    buffer <- createBuffer dpy (toDrawable overlayW) (w, h) 32 bufferFormat
+    bufFmt <- findStandardFormat dpy True
+    buffer <- liftIO $ createBuffer dpy (toDrawable overlayW) (w, h) 32 bufFmt
 
-    extra <- newResource dpy
-    createRegion dpy extra [ MkRECTANGLE 0 0 w h ]
+    extra <- liftIO $ newResource dpy
+    liftIO $ createRegion dpy extra [ MkRECTANGLE 0 0 w h ]
 
-    children <- children_QueryTreeReply <$> (queryTree dpy r >>= getReply')
+    children <- children_QueryTreeReply
+        <$> (liftIO (queryTree dpy r) >>= getReply)
 
     let hs = HollyState
             { wins           = S.empty
@@ -125,41 +128,41 @@ init dpy = do
             , extraRepaint   = extra
             }
 
-    flip execStateT hs $ do
-        ws <- catMaybes <$> mapM getWindow children
+    liftIO $ flip execStateT hs $ do
+        ws <- catMaybes <$> mapM (runMaybeT . getWindow) children
         withWindows $ const $ S.fromList ws
 
-checkExtensions :: Connection -> IO ()
+checkExtensions :: Connection -> EitherT SomeError IO ()
 checkExtensions dpy = do
-    compositePresent <- extensionPresent dpy Composite.extension
+    compositePresent <- liftIO $ extensionPresent dpy Composite.extension
     unless compositePresent $ error "Composite extension missing!"
-    compositeVersion <- Composite.queryVersion dpy 0 3 >>= getReply'
+    compositeVersion <- liftIO (Composite.queryVersion dpy 0 3) >>= getReply
     let compositeVersionOk = 
                Composite.major_version_QueryVersionReply compositeVersion > 0
             || Composite.minor_version_QueryVersionReply compositeVersion >= 3
     unless compositeVersionOk
         $ error "Composite extension version >= 0.3 required!"
 
-    renderPresent <- extensionPresent dpy Render.extension
+    renderPresent <- liftIO $ extensionPresent dpy Render.extension
     unless renderPresent $ error "Render extension required!"
-    renderVersion <- Render.queryVersion dpy 0 11 >>= getReply'
+    renderVersion <- liftIO (Render.queryVersion dpy 0 11) >>= getReply
     let renderVersionOk =
                Render.major_version_QueryVersionReply renderVersion > 0
             || Render.minor_version_QueryVersionReply renderVersion >= 11
     unless renderVersionOk
         $ error "Render extension version >= 0.11 required!"
 
-    fixesPresent <- extensionPresent dpy XFixes.extension
+    fixesPresent <- liftIO $ extensionPresent dpy XFixes.extension
     unless fixesPresent $ error "XFixes extension required!"
-    fixesVersion <- XFixes.queryVersion dpy 2 0 >>= getReply'
+    fixesVersion <- liftIO (XFixes.queryVersion dpy 2 0) >>= getReply
     let fixesVersionOk =
             XFixes.major_version_QueryVersionReply fixesVersion >= 2
     unless fixesVersionOk
         $ error "XFixes extension version >= 2 required!"
             
-    shapePresent <- extensionPresent dpy Shape.extension
+    shapePresent <- liftIO $ extensionPresent dpy Shape.extension
     unless shapePresent $ error "Shape extension required!"
-    shapeVersion <- Shape.queryVersion dpy >>= getReply'
+    shapeVersion <- liftIO (Shape.queryVersion dpy) >>= getReply
     let shapeVersionOk =
             (   Shape.major_version_QueryVersionReply shapeVersion == 1
              && Shape.minor_version_QueryVersionReply shapeVersion >= 1
@@ -167,10 +170,10 @@ checkExtensions dpy = do
     unless shapeVersionOk
         $ error "Shape extension version >= 1 required!"
 
-    damagePresent <- extensionPresent dpy Damage.extension
+    damagePresent <- liftIO $ extensionPresent dpy Damage.extension
     unless damagePresent
         $ error "Damage extension required!"
-    damageVersion <- Damage.queryVersion dpy 1 1 >>= getReply'
+    damageVersion <- liftIO (Damage.queryVersion dpy 1 1) >>= getReply
     let damageVersionOk =
             (   Damage.major_version_QueryVersionReply damageVersion == 1
              && Damage.minor_version_QueryVersionReply damageVersion >= 1
@@ -178,10 +181,9 @@ checkExtensions dpy = do
     unless damageVersionOk
         $ error "Damage extension version >= 1.1 required!"
 
-eventHandler :: Connection -> StateT HollyState IO ()
+eventHandler :: Connection -> MainLoop ()
 eventHandler dpy = forever $ do
-    st <- get
-    liftIO $ paint dpy st
+    paint
     ev <- liftIO $ waitForEvent dpy
     let handlers =
             [ createNotifyHandler
@@ -195,54 +197,49 @@ eventHandler dpy = forever $ do
             ]
         handler e = do
             mapM_ (\f -> f e) handlers
-            mE <- liftIO $ pollForEvent dpy
-            case mE of
-                Nothing -> return ()
-                Just e' -> handler e'
+            liftIO (pollForEvent dpy) >>= mapM_ handler
     handler ev
 
 -- Event Handlers -------------------------------------------------------
 
-createNotifyHandler ::SomeEvent -> StateT HollyState IO ()
-createNotifyHandler = guarded $ \ev ->
-    getWindow (window_CreateNotifyEvent ev) >>= mapM_ appendWindow
-  where appendWindow win = withWindows (S.|> win)
+createNotifyHandler, configureNotifyHandler, destroyNotifyHandler,
+    unmapNotifyHandler, mapNotifyHandler, reparentNotifyHandler,
+    circulateNotifyHandler, propertyNotifyHandler :: EventHandler
 
-configureNotifyHandler :: SomeEvent -> StateT HollyState IO ()
+createNotifyHandler = guarded $ \ev ->
+    void $ lift $ runMaybeT
+        $ getWindow (window_CreateNotifyEvent ev) >>= appendWindow
+  where appendWindow win = lift $ withWindows (S.|> win)
+
 configureNotifyHandler = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
         abv = above_sibling_ConfigureNotifyEvent ev
-        arrangeWindows new = withWindows $ \ws ->
+        arrangeWindows new = lift $ withWindows $ \ws ->
             let (above, below) = S.spanr ((/= abv) . winId) ws
             in below S.>< (new S.<| above)
-    findWindow wid discardWindow
-    getWindow wid >>= mapM_ arrangeWindows
+    lift $ findWindow wid discardWindow
+    void $ lift $ runMaybeT $ getWindow wid >>= arrangeWindows
 
-destroyNotifyHandler :: SomeEvent -> StateT HollyState IO ()
 destroyNotifyHandler = guarded $ \ev ->
-    findWindow (window_DestroyNotifyEvent ev) discardWindow
+    lift $ findWindow (window_DestroyNotifyEvent ev) discardWindow
 
-unmapNotifyHandler :: SomeEvent -> StateT HollyState IO ()
 unmapNotifyHandler = guarded $ \ev ->
-    findWindow (window_UnmapNotifyEvent ev) discardWindow
+    lift $ findWindow (window_UnmapNotifyEvent ev) discardWindow
 
-mapNotifyHandler :: SomeEvent -> StateT HollyState IO ()
 mapNotifyHandler = guarded $ \ev ->
-    getWindow (window_MapNotifyEvent ev) >>= mapM_ mapWindow'
-  where mapWindow' win = withWindows (S.|> win)
+    void $ lift $ runMaybeT $ getWindow (window_MapNotifyEvent ev) >>= mapWindow'
+  where mapWindow' win = lift $ withWindows (S.|> win)
 
-reparentNotifyHandler :: SomeEvent -> StateT HollyState IO ()
 reparentNotifyHandler = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
-    rootWindow <- gets root
+        prependWindow win = lift $ withWindows (win S.<|)
+    rootWindow <- lift $ gets root
     if parent_ReparentNotifyEvent ev == rootWindow
-        then getWindow wid
-            >>= maybe (return ()) (\win -> withWindows (win S.<|))
-        else findWindow wid $ discardWindow
+        then void $ lift $ runMaybeT $ getWindow wid >>= prependWindow
+        else lift $ findWindow wid $ discardWindow
 
-circulateNotifyHandler :: SomeEvent -> StateT HollyState IO ()
 circulateNotifyHandler = guarded $ \ev -> do
-    withWindows $ \ws -> do
+    lift $ withWindows $ \ws -> do
         let wid = window_CirculateNotifyEvent ev
             ws' = S.filter ((/= wid) . winId) ws
             circulate wIx =
@@ -252,15 +249,14 @@ circulateNotifyHandler = guarded $ \ev -> do
                     PlaceOnTop -> ws' S.|> win
         maybe ws circulate $ S.findIndexL ((== wid) . winId) ws
 
-propertyNotifyHandler :: SomeEvent -> StateT HollyState IO ()
 propertyNotifyHandler = guarded $ \ev -> do
-    dpy <- gets display
+    dpy <- lift $ gets display
     let wid = window_PropertyNotifyEvent ev
-    opacityAtom <- liftIO $ getAtom dpy "_NET_WM_WINDOW_OPACITY" False
+    opacityAtom <- getAtom dpy "_NET_WM_WINDOW_OPACITY" False
     if atom_PropertyNotifyEvent ev == opacityAtom
         then do
-            newOpacity <- liftIO $ getWindowOpacity dpy wid
-            findWindowIx wid $ \ix -> do
+            newOpacity <- getWindowOpacity dpy wid
+            lift $ findWindowIx wid $ \ix -> do
                 win <- gets $ flip S.index ix . wins
                 damageWholeWindow win
                 withWindows $ S.update ix $ win { winOpacity = newOpacity }
@@ -272,56 +268,54 @@ propertyNotifyHandler = guarded $ \ev -> do
 guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
 guarded f ev = let ev' = fromEvent ev in when (isJust ev') $ f $ fromJust ev'
 
-findWindowIx :: WINDOW -> (Int -> StateT HollyState IO ()) -> StateT HollyState IO ()
+findWindowIx :: Monad m => WINDOW -> (Int -> StateT HollyState m ()) -> StateT HollyState m ()
 findWindowIx wid go =
     gets (S.findIndexL ((== wid) . winId) . wins) >>= maybe (return ()) go
 
-findWindow :: WINDOW -> (Win -> StateT HollyState IO ()) -> StateT HollyState IO ()
+findWindow :: Monad m => WINDOW -> (Win -> StateT HollyState m ()) -> StateT HollyState m ()
 findWindow wid go = findWindowIx wid
     $ \ix -> gets (flip S.index ix . wins) >>= go
 
-updateWindow :: Win -> StateT HollyState IO ()
+updateWindow :: MonadIO m => Win -> StateT HollyState m ()
 updateWindow new = findWindowIx (winId new) $ \oldIx -> do
     gets (flip S.index oldIx . wins) >>= freeWindow
     withWindows $ S.update oldIx new
 
-freeWindow :: Win -> StateT HollyState IO ()
+freeWindow :: MonadIO m => Win -> StateT HollyState m ()
 freeWindow win = do
     dpy <- gets display
     liftIO $ do
         Damage.destroy dpy $ winDamage win
         freePicture dpy $ winPicture win
 
-withWindows :: (Seq Win -> Seq Win) -> StateT HollyState IO ()
+withWindows :: Monad m => (Seq Win -> Seq Win) -> StateT HollyState m ()
 withWindows f = modify $ \s -> s { wins = f (wins s) }
 
-getWindow :: WINDOW -> StateT HollyState IO (Maybe Win)
-getWindow wid = do
-    dpy <- gets display
-    attrs <- liftIO $ getWindowAttributes dpy wid >>= getReply'
+getWindow :: WINDOW -> MaybeT (StateT HollyState IO) Win
+getWindow wid = hushT $ do
+    dpy <- lift $ gets display
+    attrs <- liftIO (getWindowAttributes dpy wid) >>= getReply
     if (inputOnly attrs || not (viewable attrs))
-        then return Nothing
+        then left $ toError $ UnknownError ""
         else do
-            win <- liftIO $ do
-                geom <- getGeometry dpy (toDrawable wid) >>= getReply'
-                opacity <- getWindowOpacity dpy wid
-                fmt <- findVisualFormat dpy
-                    $ visual_GetWindowAttributesReply attrs
-                changeWindowAttributes dpy wid $ toValueParam
-                    [(CWEventMask, toMask [ EventMaskPropertyChange ])]
+            geom <- liftIO (getGeometry dpy $ toDrawable wid) >>= getReply
+            opacity <- getWindowOpacity dpy wid
+            fmt <- findVisualFormat dpy
+                $ visual_GetWindowAttributesReply attrs
+            liftIO $ changeWindowAttributes dpy wid $ toValueParam
+                [(CWEventMask, toMask [ EventMaskPropertyChange ])]
 
-                pixmap <- newResource dpy
+            pixmap <- liftIO $ newResource dpy
+            dam <- liftIO $ newResource dpy
+            pict <- liftIO $ newResource dpy
+            liftIO $ do
                 nameWindowPixmap dpy wid pixmap
-
-                dam <- newResource dpy
-                Damage.create dpy $! Damage.MkCreate
+                Damage.create dpy Damage.MkCreate
                     { Damage.damage_Create   = dam
                     , Damage.drawable_Create = toDrawable pixmap
                     , Damage.level_Create    = Damage.ReportLevelNonEmpty
                     }
-
-                pict <- newResource dpy
-                createPicture dpy $ MkCreatePicture
+                createPicture dpy MkCreatePicture
                     { pid_CreatePicture      = pict
                     , drawable_CreatePicture = toDrawable pixmap
                     , format_CreatePicture   = fmt
@@ -332,7 +326,7 @@ getWindow wid = do
                     }
                 freePixmap dpy pixmap
 
-                return Win
+            let win = Win
                     { winX       = x_GetGeometryReply geom
                     , winY       = y_GetGeometryReply geom
                     , winW       = width_GetGeometryReply geom
@@ -344,8 +338,10 @@ getWindow wid = do
                     , winDamage  = dam
                     , winPicture = pict
                     }
-            damageWholeWindow win
-            return $ Just win
+
+            lift $ damageWholeWindow win
+
+            return win
   where
     viewable = (== MapStateViewable) . map_state_GetWindowAttributesReply
     inputOnly = (== WindowClassInputOnly) . class_GetWindowAttributesReply

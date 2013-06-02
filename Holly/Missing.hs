@@ -4,73 +4,80 @@ module Holly.Missing
     , findStandardFormat
     , findVisualFormat
     , getAtom
-    , getReply'
+    , getReply
     , getWindowOpacity
     ) where
 
 import Control.Applicative ( (<$>) )
+import Control.Monad.IO.Class
 
-import Graphics.XHB
+import Control.Error
+
+import qualified Graphics.XHB as X
+import Graphics.XHB hiding ( getReply )
 import Graphics.XHB.Connection.Open ( screen )
 import Graphics.XHB.Gen.Render
 
 import Holly.Drawable
 import Holly.Types
 
-getReply' :: Receipt a -> IO a
-getReply' rcpt = do
-    reply <- getReply rcpt
-    case reply of
-        Left err -> error $ show err
-        Right a -> return a
+getReply :: MonadIO m => Receipt a -> EitherT SomeError m a
+getReply receipt = liftIO (X.getReply receipt) >>= hoistEither
 
-getAtom :: Connection -> String -> Bool -> IO ATOM
-getAtom dpy name onlyIfExists =
-    (internAtom dpy $! MkInternAtom
+getAtom :: MonadIO m => Connection -> String -> Bool -> EitherT SomeError m ATOM
+getAtom dpy name onlyIfExists = do
+    liftIO requestAtom >>= getReply
+  where
+    requestAtom = internAtom dpy MkInternAtom
         { only_if_exists_InternAtom = onlyIfExists
         , name_len_InternAtom = fromIntegral $! length cname
         , name_InternAtom = cname
         }
-    ) >>= getReply'
-  where
     cname = stringToCList name
 
-findVisualFormat :: Connection -> VISUALID -> IO PICTFORMAT
+findVisualFormat :: MonadIO m => Connection -> VISUALID -> EitherT SomeError m PICTFORMAT
 findVisualFormat dpy vid =
     format_PICTVISUAL . head
         . filter ((== vid) . visual_PICTVISUAL)
         <$> findScreenPictVisuals dpy
 
-findStandardFormat :: Connection -> Bool -> IO PICTFORMAT
+findStandardFormat :: MonadIO m => Connection -> Bool -> EitherT SomeError m PICTFORMAT
 findStandardFormat dpy argb = do
-    id_PICTFORMINFO . head
-        . filter ((== (if argb then 32 else 8)) . depth_PICTFORMINFO)
-        . filter ((== PictTypeDirect) . type_PICTFORMINFO)
-        . formats_QueryPictFormatsReply
-        <$> (queryPictFormats dpy >>= getReply')
+    pictFormats <- liftIO (queryPictFormats dpy) >>= getReply
+    return  $ id_PICTFORMINFO
+            $ head
+            $ filter ((== (if argb then 32 else 8)) . depth_PICTFORMINFO)
+            $ filter ((== PictTypeDirect) . type_PICTFORMINFO)
+            $ formats_QueryPictFormatsReply pictFormats
 
-findScreenFormats :: Connection -> IO [PICTFORMAT]
+findScreenFormats :: MonadIO m => Connection -> EitherT SomeError m [PICTFORMAT]
 findScreenFormats dpy = map format_PICTVISUAL <$> findScreenPictVisuals dpy
 
-findScreenPictVisuals :: Connection -> IO [PICTVISUAL]
-findScreenPictVisuals dpy =
-    concatMap visuals_PICTDEPTH . depths_PICTSCREEN
-    . (!! (screen $ displayInfo dpy)) . screens_QueryPictFormatsReply
-    <$> (queryPictFormats dpy >>= getReply')
+findScreenPictVisuals :: MonadIO m => Connection -> EitherT SomeError m [PICTVISUAL]
+findScreenPictVisuals dpy = do
+    pictFormats <- liftIO (queryPictFormats dpy) >>= getReply
+    return  $ concatMap visuals_PICTDEPTH
+            $ depths_PICTSCREEN
+            $ (!! (screen $ displayInfo dpy))
+            $ screens_QueryPictFormatsReply pictFormats
 
-getWindowOpacity :: Connection -> WINDOW -> IO Double
+getWindowOpacity :: MonadIO m => Connection -> WINDOW -> EitherT SomeError m Double
 getWindowOpacity dpy win = do
     cardinalAtom <- getAtom dpy "CARDINAL" True
     opacityAtom <- getAtom dpy "_NET_WM_WINDOW_OPACITY" False
 
-    val <- value_GetPropertyReply <$> ((getProperty dpy $ MkGetProperty
-        { delete_GetProperty = False
-        , window_GetProperty = win
-        , property_GetProperty = opacityAtom
-        , type_GetProperty = cardinalAtom
-        , long_offset_GetProperty = 0
-        , long_length_GetProperty = 1
-        }) >>= getReply')
+    let propRequest = getProperty dpy MkGetProperty
+            { delete_GetProperty      = False
+            , window_GetProperty      = win
+            , property_GetProperty    = opacityAtom
+            , type_GetProperty        = cardinalAtom
+            , long_offset_GetProperty = 0
+            , long_length_GetProperty = 1
+            }
+
+    propReply <- liftIO propRequest >>= getReply
+    let val = value_GetPropertyReply propReply
+
     return $! if null val
         then 1.0
         else fromIntegral (head val) / fromIntegral maxOpacity
