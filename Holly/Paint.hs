@@ -14,10 +14,9 @@ import Graphics.XHB.Gen.XFixes
 import Holly.Types
 import Holly.XHB
 
-paint :: MainLoop ()
-paint = do
+paint :: Connection -> MainLoop ()
+paint dpy = do
     holly <- lift get
-    dpy <- lift $ gets display
     overlay <- lift $ gets overlayPicture
     buffer <- lift $ gets bufferPicture
     overlayDamage <- lift $ gets extraRepaint

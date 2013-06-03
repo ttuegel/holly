@@ -108,7 +108,6 @@ init dpy = do
 
     let hs = HollyState
             { wins           = S.empty
-            , display        = dpy
             , scr            = s
             , root           = r
             , rootW          = w
@@ -121,7 +120,7 @@ init dpy = do
             }
 
     liftIO $ flip execStateT hs $ do
-        ws <- catMaybes <$> mapM (runMaybeT . getWindow) children
+        ws <- catMaybes <$> mapM (runMaybeT . getWindow dpy) children
         withWindows $ const $ S.fromList ws
 
 checkExtensions :: Connection -> EitherT SomeError IO ()

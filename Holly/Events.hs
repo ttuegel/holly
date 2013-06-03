@@ -18,9 +18,9 @@ import Holly.XHB
 
 eventHandler :: Connection -> MainLoop ()
 eventHandler dpy = forever $ do
-    paint
+    paint dpy
     ev <- liftIO $ waitForEvent dpy
-    let handlers =
+    let handlers = map ($ dpy)
             [ createNotifyHandler
             , configureNotifyHandler
             , destroyNotifyHandler
@@ -39,41 +39,41 @@ eventHandler dpy = forever $ do
 
 createNotifyHandler, configureNotifyHandler, destroyNotifyHandler,
     unmapNotifyHandler, mapNotifyHandler, reparentNotifyHandler,
-    circulateNotifyHandler, propertyNotifyHandler :: EventHandler
+    circulateNotifyHandler, propertyNotifyHandler :: Connection -> EventHandler
 
-createNotifyHandler = guarded $ \ev ->
+createNotifyHandler dpy = guarded $ \ev ->
     void $ lift $ runMaybeT
-        $ getWindow (window_CreateNotifyEvent ev) >>= appendWindow
+        $ getWindow dpy (window_CreateNotifyEvent ev) >>= appendWindow
   where appendWindow win = lift $ withWindows (|> win)
 
-configureNotifyHandler = guarded $ \ev -> do
+configureNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ConfigureNotifyEvent ev
         abv = above_sibling_ConfigureNotifyEvent ev
         arrangeWindows new = lift $ withWindows $ \ws ->
             let (above, below) = S.spanr ((/= abv) . winId) ws
             in below >< (new <| above)
-    lift $ findWindow wid discardWindow
-    void $ lift $ runMaybeT $ getWindow wid >>= arrangeWindows
+    lift $ findWindow wid (discardWindow dpy)
+    void $ lift $ runMaybeT $ getWindow dpy wid >>= arrangeWindows
 
-destroyNotifyHandler = guarded $ \ev ->
-    lift $ findWindow (window_DestroyNotifyEvent ev) discardWindow
+destroyNotifyHandler dpy = guarded $ \ev ->
+    lift $ findWindow (window_DestroyNotifyEvent ev) (discardWindow dpy)
 
-unmapNotifyHandler = guarded $ \ev ->
-    lift $ findWindow (window_UnmapNotifyEvent ev) discardWindow
+unmapNotifyHandler dpy = guarded $ \ev ->
+    lift $ findWindow (window_UnmapNotifyEvent ev) (discardWindow dpy)
 
-mapNotifyHandler = guarded $ \ev ->
-    void $ lift $ runMaybeT $ getWindow (window_MapNotifyEvent ev) >>= mapWindow'
+mapNotifyHandler dpy = guarded $ \ev ->
+    void $ lift $ runMaybeT $ getWindow dpy (window_MapNotifyEvent ev) >>= mapWindow'
   where mapWindow' win = lift $ withWindows (|> win)
 
-reparentNotifyHandler = guarded $ \ev -> do
+reparentNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_ReparentNotifyEvent ev
         prependWindow win = lift $ withWindows (win <|)
     rootWindow <- lift $ gets root
     if parent_ReparentNotifyEvent ev == rootWindow
-        then void $ lift $ runMaybeT $ getWindow wid >>= prependWindow
-        else lift $ findWindow wid $ discardWindow
+        then void $ lift $ runMaybeT $ getWindow dpy wid >>= prependWindow
+        else lift $ findWindow wid $ discardWindow dpy
 
-circulateNotifyHandler = guarded $ \ev -> do
+circulateNotifyHandler _ = guarded $ \ev -> do
     lift $ withWindows $ \ws -> do
         let wid = window_CirculateNotifyEvent ev
             ws' = S.filter ((/= wid) . winId) ws
@@ -84,8 +84,7 @@ circulateNotifyHandler = guarded $ \ev -> do
                     PlaceOnTop -> ws' |> win
         maybe ws circulate $ S.findIndexL ((== wid) . winId) ws
 
-propertyNotifyHandler = guarded $ \ev -> do
-    dpy <- lift $ gets display
+propertyNotifyHandler dpy = guarded $ \ev -> do
     let wid = window_PropertyNotifyEvent ev
     opacityAtom <- getAtom dpy "_NET_WM_WINDOW_OPACITY" False
     if atom_PropertyNotifyEvent ev == opacityAtom
@@ -93,7 +92,7 @@ propertyNotifyHandler = guarded $ \ev -> do
             newOpacity <- getWindowOpacity dpy wid
             lift $ findWindowIx wid $ \ix -> do
                 win <- gets $ flip S.index ix . wins
-                damageWholeWindow win
+                damageWholeWindow dpy win
                 withWindows $ S.update ix $ win { winOpacity = newOpacity }
         else return ()
 
@@ -111,9 +110,8 @@ findWindow :: Monad m => WINDOW -> (Win -> StateT HollyState m ()) -> StateT Hol
 findWindow wid go = findWindowIx wid
     $ \ix -> gets (flip S.index ix . wins) >>= go
 
-freeWindow :: MonadIO m => Win -> StateT HollyState m ()
-freeWindow win = do
-    dpy <- gets display
+freeWindow :: MonadIO m => Connection -> Win -> StateT HollyState m ()
+freeWindow dpy win = do
     liftIO $ do
         Damage.destroy dpy $ winDamage win
         freePicture dpy $ winPicture win
@@ -121,9 +119,8 @@ freeWindow win = do
 withWindows :: Monad m => (Seq Win -> Seq Win) -> StateT HollyState m ()
 withWindows f = modify $ \s -> s { wins = f (wins s) }
 
-getWindow :: WINDOW -> MaybeT (StateT HollyState IO) Win
-getWindow wid = hushT $ do
-    dpy <- lift $ gets display
+getWindow :: Connection -> WINDOW -> MaybeT (StateT HollyState IO) Win
+getWindow dpy wid = hushT $ do
     attrs <- liftIO (getWindowAttributes dpy wid) >>= getReply
     if (inputOnly attrs || not (viewable attrs))
         then left $ toError $ UnknownError ""
@@ -169,15 +166,15 @@ getWindow wid = hushT $ do
                     , winPicture = pict
                     }
 
-            lift $ damageWholeWindow win
+            lift $ damageWholeWindow dpy win
 
             return win
   where
     viewable = (== MapStateViewable) . map_state_GetWindowAttributesReply
     inputOnly = (== WindowClassInputOnly) . class_GetWindowAttributesReply
 
-damageWholeWindow :: Win -> StateT HollyState IO ()
-damageWholeWindow win = do
+damageWholeWindow :: Connection -> Win -> StateT HollyState IO ()
+damageWholeWindow dpy win = do
     let x = winX win
         y = winY win
         w = winW win
@@ -185,7 +182,6 @@ damageWholeWindow win = do
         bI = fromIntegral $ winB win
         bW = winB win
     extra <- gets extraRepaint
-    dpy <- gets display
     liftIO $ do
         region <- newResource dpy
         createRegion dpy region
@@ -193,8 +189,8 @@ damageWholeWindow win = do
         unionRegion dpy $! MkUnionRegion region extra extra
         destroyRegion dpy region
 
-discardWindow :: Win -> StateT HollyState IO ()
-discardWindow win = do
-    damageWholeWindow win
-    freeWindow win
+discardWindow :: Connection -> Win -> StateT HollyState IO ()
+discardWindow dpy win = do
+    damageWholeWindow dpy win
+    freeWindow dpy win
     withWindows $ S.filter ((/= winId win) . winId)

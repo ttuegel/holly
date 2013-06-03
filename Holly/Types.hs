@@ -34,7 +34,6 @@ import Graphics.XHB.Gen.XFixes ( REGION )
 
 data HollyState = HollyState
     { wins           :: Seq Win
-    , display        :: Connection
     , root           :: WINDOW
     , scr            :: SCREEN
     , rootW          :: Word16
