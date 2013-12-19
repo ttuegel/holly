@@ -9,35 +9,31 @@ import Data.Int
 import Data.Sequence ( Seq )
 import Data.Word
 
-import Graphics.XHB
-import Graphics.XHB.Gen.Damage ( DAMAGE )
-import Graphics.XHB.Gen.Render ( PICTFORMAT, PICTURE )
-import Graphics.XHB.Gen.XFixes ( REGION )
+import Holly.X11
 
 data HollyState = HollyState
     { wins  :: Seq Win
-    , display   :: Connection
-    , root  :: WINDOW
-    , scr   :: SCREEN
+    , display   :: Display
+    , root  :: Window
+    , scr   :: Screen
     , rootW :: Word16
     , rootH :: Word16
-    , rootFormat :: PICTFORMAT
-    , overlayPicture :: PICTURE
-    , overlayWindow :: WINDOW
-    , bufferPicture :: PICTURE
-    , extraRepaint  :: REGION
+    , rootFormat :: PictFormat
+    , overlayPicture :: Picture
+    , overlayWindow :: Window
+    , bufferPicture :: Picture
+    , extraRepaint  :: Region
     }
 
 data Win = Win
-    { winId :: WINDOW
+    { winId :: Window
     , winX  :: Int16
     , winY  :: Int16
     , winW  :: Word16
     , winH  :: Word16
     , winB  :: Word16
-    , winFormat :: PICTFORMAT
+    , winFormat :: PictFormat
     , winOpacity :: Double
-    , winDamage :: DAMAGE
-    , winPicture    :: PICTURE
+    , winDamage :: Damage
+    , winPicture    :: Picture
     }
-  deriving (Eq, Show)

@@ -9,35 +9,28 @@ import Data.Maybe ( isJust )
 import Data.Traversable ( mapM )
 import Prelude hiding ( mapM )
 
-import Graphics.XHB
-import qualified Graphics.XHB.Gen.Damage as Damage
-import Graphics.XHB.Gen.Render
-import Graphics.XHB.Gen.XFixes
-
-import Holly.Drawable
-import Holly.Missing
 import Holly.Types
+import Holly.X11
 
-paint :: Connection -> HollyState -> IO ()
+paint :: Display -> HollyState -> IO ()
 paint dpy holly = do
     let overlay = overlayPicture holly
         buffer = bufferPicture holly
 
     let overlayDamage = extraRepaint holly
         applyWindowDamage win = do
-            region <- newResource dpy
-            createRegion dpy region []
-            Damage.subtract dpy $! Damage.MkSubtract
-                (winDamage win) (fromXid xidNone) region
+            region <- createRegion dpy overlay
+            damageSubtract dpy (winDamage win) Nothing (Just region)
             let b = fromIntegral $! winB win
-            translateRegion dpy $! MkTranslateRegion region
-                (winX win - b) (winY win - b)
-            unionRegion dpy $! MkUnionRegion region overlayDamage overlayDamage
+            offsetRegion dpy region (winX win - b) (winY win - b)
+            unionRegion dpy region overlayDamage overlayDamage
             destroyRegion dpy region
     void $ mapM applyWindowDamage $ wins holly
-    setPictureClipRegion dpy $! MkSetPictureClipRegion buffer overlayDamage 0 0
-    setPictureClipRegion dpy $! MkSetPictureClipRegion overlay overlayDamage 0 0
-    setRegion dpy overlayDamage []
+    setPictureClipRegion dpy buffer overlayDamage
+    setPictureClipRegion dpy overlay overlayDamage
+    emptyRegion <- createRegion dpy overlay
+    intersectRegion overlayDamage emptyRegion emptyRegion
+    destroyRegion emptyRegion
 
     let draw win = do
             mask <- solidPicture dpy (toDrawable $ overlayWindow holly)
@@ -49,19 +42,12 @@ paint dpy holly = do
             freePicture dpy mask
 
     mRootPixmap <- getRootPixmap dpy $ root holly
-    case mRootPixmap of
-        Nothing -> return ()
-        Just rootPixmap -> do
-            rootPicture <- newResource dpy
-            createPicture dpy $! MkCreatePicture
-                { pid_CreatePicture = rootPicture
-                , drawable_CreatePicture = toDrawable rootPixmap
-                , format_CreatePicture = rootFormat holly
-                , value_CreatePicture = emptyValueParam
-                }
-            simpleComposite dpy PictOpSrc rootPicture Nothing
-                            buffer (0, 0) (rootW holly, rootH holly)
-            freePicture dpy rootPicture
+    maybe (return ()) $ \rootPixmap -> do
+        rootPicture <- createPicture dpy (toDrawable rootPixmap)
+                                     (rootFormat holly) def
+        simpleComposite dpy PictOpSrc rootPicture Nothing
+                        buffer (0, 0) (rootW holly, rootH holly)
+        freePicture dpy rootPicture
 
     void $ mapM draw $ wins holly
 
@@ -71,32 +57,23 @@ paint dpy holly = do
 -- Painting Utilities ---------------------------------------------------
 
 simpleComposite
-    :: Connection
+    :: Display
     -> PictOp           -- operation
-    -> PICTURE          -- source
-    -> Maybe PICTURE    -- mask
-    -> PICTURE          -- destination
-    -> (Int16, Int16)   -- (x, y)
-    -> (Word16, Word16) -- (width, height)
+    -> Picture          -- source
+    -> Maybe Picture    -- mask
+    -> Picture          -- destination
+    -> (Position, Position)   -- (x, y)
+    -> (Dimension, Dimension) -- (width, height)
     -> IO ()
-simpleComposite dpy op src mask dest (x, y) (w, h) =
-    composite dpy $! MkComposite
-        { op_Composite = op
-        , src_Composite = src
-        , mask_Composite = maybe (fromXid xidNone) id mask
-        , dst_Composite = dest
-        , src_x_Composite = 0
-        , src_y_Composite = 0
-        , mask_x_Composite = 0
-        , mask_y_Composite = 0
-        , dst_x_Composite = x
-        , dst_y_Composite = y
-        , width_Composite = w
-        , height_Composite = h
-        }
+simpleComposite dpy op srcPict maskPict dstPict (x', y') (w, h) =
+    composite dpy op src mask dst (w, h)
+  where
+    src = Located { x = 0, y = 0, val = srcPict }
+    mask = fmap (\p -> Located { x = 0, y = 0, val = p }) maskPict
+    dst = Located { x = x', y = y', val = dstPict }
 
-solidPicture :: Connection -> DRAWABLE -> Double
-             -> Maybe (Double, Double, Double) -> IO PICTURE
+solidPicture :: Display -> Drawable -> Double
+             -> Maybe (Double, Double, Double) -> IO Picture
 solidPicture dpy draw a mRGB = do
     format <- findStandardFormat dpy (isJust mRGB)
     picture <- createBuffer dpy draw (1, 1) (if isJust mRGB then 32 else 8) format
@@ -118,25 +95,9 @@ solidPicture dpy draw a mRGB = do
 
     return picture
 
-getRootPixmap :: Connection -> WINDOW -> IO (Maybe PIXMAP)
+getRootPixmap :: Display -> Window -> IO (Maybe Pixmap)
 getRootPixmap dpy rootWindow = do
-    rootPixmapAtom <- getAtom dpy "_XROOTPMAP_ID" False
-    pixmapAtom <- getAtom dpy "PIXMAP" True
-
-    pixmapIdBytes <- value_GetPropertyReply
-        <$> ((getProperty dpy $! MkGetProperty
-            { delete_GetProperty = False
-            , window_GetProperty = rootWindow
-            , property_GetProperty = rootPixmapAtom
-            , type_GetProperty = pixmapAtom
-            , long_offset_GetProperty = 0
-            , long_length_GetProperty = 4
-            }) >>= getReply')
-    let shifts = map (* 8) [0..3]
-        pixmapIdWords = zipWith shiftL (map fromIntegral pixmapIdBytes) shifts
-        pixmapId :: Word32
-        pixmapId = sum pixmapIdWords
-    return $! if null pixmapIdBytes
-        then Nothing
-        else Just $! fromXid $! toXid pixmapId
+    rootPixmapAtom <- internAtom dpy "_XROOTPMAP_ID" False
+    pixmapIdBytes <- getWindowProperty32 dpy rootPixmapAtom rootWindow
+    return $! fmap (fromIntegral . head) pixmapIdBytes
 

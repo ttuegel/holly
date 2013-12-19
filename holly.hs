@@ -10,28 +10,11 @@ import Data.Maybe ( catMaybes, fromJust, isJust )
 import Data.Sequence ( Seq )
 import Data.Traversable ( mapM )
 import qualified Data.Sequence as S
-import Graphics.XHB
-import qualified Graphics.XHB.Gen.Composite as Composite
-    ( extension, queryVersion, QueryVersionReply(..) )
-import Graphics.XHB.Gen.Composite
-import Graphics.XHB.Connection.Extension
-import Graphics.XHB.Connection.Open hiding ( display )
-import qualified Graphics.XHB.Gen.Damage as Damage
-import qualified Graphics.XHB.Gen.Render as Render
-    ( extension, queryVersion, QueryVersionReply(..) )
-import Graphics.XHB.Gen.Render
-import qualified Graphics.XHB.Gen.Shape as Shape
-    ( extension, queryVersion, QueryVersionReply(..) )
-import Graphics.XHB.Gen.Shape hiding ( mask )
-import qualified Graphics.XHB.Gen.XFixes as XFixes
-    ( extension, queryVersion, QueryVersionReply(..) )
-import Graphics.XHB.Gen.XFixes
 import Prelude hiding ( init, mapM )
 
-import Holly.Drawable
-import Holly.Missing
 import Holly.Paint
 import Holly.Types
+import Holly.X11
 
 -- Main Loop ------------------------------------------------------------
 
@@ -59,33 +42,18 @@ init dpy = do
     rootF <- findVisualFormat dpy rootVisual
 
     overlayW <- getOverlayWindow dpy r >>= getReply'
-    overlayP <- newResource dpy
-    createPicture dpy $! MkCreatePicture
-        { pid_CreatePicture = overlayP
-        , drawable_CreatePicture = toDrawable overlayW
-        , format_CreatePicture = rootF
-        , value_CreatePicture = toValueParam
-            [(CPSubwindowMode, toValue SubwindowModeIncludeInferiors)]
-        }
-    rectangles dpy $! MkRectangles
-        { operation_Rectangles = SOSet
-        , destination_kind_Rectangles = SKInput
-        , ordering_Rectangles = ClipOrderingUnsorted
-        , destination_window_Rectangles = overlayW
-        , x_offset_Rectangles = 0
-        , y_offset_Rectangles = 0
-        , rectangles_Rectangles = []
-        }
+    overlayP <- createPicture dpy overlayW rootF
+                              def { subwindowMode = subwindowIncludeInferiors }
+    shapeRectangles dpy overlayW destKindInput (0, 0) []
+                    shapeOpSet clipOrderUnsort
 
-    changeWindowAttributes dpy r $! toValueParam
-        [(CWEventMask, toMask
-            [ EventMaskSubstructureNotify
-            , EventMaskExposure
-            , EventMaskStructureNotify
-            , EventMaskPropertyChange
-            ]
-         )]
-    selectInput dpy r True
+    selectInput dpy r
+        $ foldr (.|.) 0
+        [ eventMaskSubstructureNotify
+        , eventMaskExposure
+        , eventMaskStructureNotify
+        , eventMaskPropertyChange
+        ]
 
     let w = width_GetGeometryReply geom
         h = height_GetGeometryReply geom
