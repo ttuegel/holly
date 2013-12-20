@@ -37,11 +37,6 @@ import Holly.Events
 import Holly.Types
 import Holly.XHB
 
-import Holly.Drawable
-import Holly.Missing
-import Holly.Paint
-import Holly.Types
-
 -- Main Loop ------------------------------------------------------------
 
 main :: IO ()
