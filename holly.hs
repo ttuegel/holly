@@ -128,7 +128,7 @@ checkExtensions dpy = do
     compositePresent <- liftIO $ extensionPresent dpy Composite.extension
     unless compositePresent $ error "Composite extension missing!"
     compositeVersion <- liftIO (Composite.queryVersion dpy 0 3) >>= getReply
-    let compositeVersionOk = 
+    let compositeVersionOk =
                Composite.major_version_QueryVersionReply compositeVersion > 0
             || Composite.minor_version_QueryVersionReply compositeVersion >= 3
     unless compositeVersionOk
@@ -150,7 +150,7 @@ checkExtensions dpy = do
             XFixes.major_version_QueryVersionReply fixesVersion >= 2
     unless fixesVersionOk
         $ error "XFixes extension version >= 2 required!"
-            
+
     shapePresent <- liftIO $ extensionPresent dpy Shape.extension
     unless shapePresent $ error "Shape extension required!"
     shapeVersion <- liftIO (Shape.queryVersion dpy) >>= getReply
