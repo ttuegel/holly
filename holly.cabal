@@ -24,5 +24,6 @@ executable holly
                     prelude-prime == 0.1.*,
                     containers >= 0.4 && < 0.6,
                     errors == 1.4.*,
+                    sodium == 0.10.*,
                     transformers >= 0.2 && < 0.4,
                     xhb == 0.5.*

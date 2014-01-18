@@ -29,70 +29,118 @@ eventHandler dpy = forever $ do
             liftIO (pollForEvent dpy) >>= mapM_ handler
     handler ev
 
+eventHandler :: Connection -> HollyState -> IO ()
+eventHandler dpy inState = do
+  (xhbEvent, pushXhb) <- newEvent
+
+runHandler :: EventHandler
+           -> Connection
+           -> SomeEvent
+           -> (HollyState, [Repaint])
+           -> IO (HollyState, [Repaint])
+runHandler evHandler dpy ev (inState, inPaints) =
+  fmap (fromMaybe (inState, inPaints)) $ runMaybeT $ do
+    (outState, mRepaint) <- evHandler dpy inState ev
+    let outPaints = maybe inPaints (: inPaints) mRepaint
+    return (outState, outPaints)
+
 -- Event Handlers -------------------------------------------------------
 
-createNotifyHandler, configureNotifyHandler, destroyNotifyHandler,
-    unmapNotifyHandler, mapNotifyHandler, reparentNotifyHandler,
-    circulateNotifyHandler, propertyNotifyHandler :: Connection -> EventHandler
+type EventHandler = Tree Win -> SomeEvent -> Maybe (Tree Win, Maybe Repaint)
 
-createNotifyHandler dpy = guarded $ \ev ->
-    void $ lift $ runMaybeT
-        $ getWindow dpy (window_CreateNotifyEvent ev) >>= appendWindow
-  where appendWindow win = lift $ withWindows (|> win)
+createHandler :: EventHandler
+createHandler tree = withEvent $ \ev ->
+  let wid = window_CreateNotifyEvent ev
+      win = Win { _wid = wid
+                , _x = x_CreateNotifyEvent ev
+                , _y = y_CreateNotifyEvent ev
+                , _width = width_CreateNotifyEvent ev
+                , _height = height_CreateNotifyEvent ev
+                , _borderWidth = border_width_CreateNotifyEvent ev
+                , _mapped = False }
+      pid = parent_CreateNotifyEvent ev
+      go node | _wid (rootLabel node) == wid =
+                node { subForest = subForest node ++ [win] }
+              | otherwise = node { subForest = map go (subForest node) }
+      tree' = go tree
+   in (tree', Nothing)
 
-configureNotifyHandler dpy = guarded $ \ev -> do
-    let wid = window_ConfigureNotifyEvent ev
+configureHandler :: EventHandler
+configureHandler tree = withEvent $ \ev ->
+  let wid = window_ConfigureNotifyEvent ev
+  in fromMaybe (tree, Nothing) $ do
+    ix <- S.findIndexL ((== wid) . winId) inWins
+    let oldWin = S.index ix inWins
+        newWin = oldWin & x .~ x_ConfigureNotifyEvent ev
+                        & y .~ y_ConfigureNotifyEvent ev
+                        & width .~ width_ConfigureNotifyEvent ev
+                        & height .~ height_ConfigureNotifyEvent ev
+                        & borderWidth .~ border_width_ConfigureNotifyEvent ev
         abv = above_sibling_ConfigureNotifyEvent ev
-        arrangeWindows new = lift $ withWindows $ \ws ->
-            let (above, below) = S.spanr ((/= abv) . winId) ws
-            in below >< (new <| above)
-    lift $ findWindow wid (discardWindow dpy)
-    void $ lift $ runMaybeT $ getWindow dpy wid >>= arrangeWindows
+        keeping = S.filter ((/= wid) . winId) inWins
+        (above, below) = S.spanr ((/= abv) . winId) keeping
+    return (below >< (newWin <| above), repaintWindow wid)
 
-destroyNotifyHandler dpy = guarded $ \ev ->
-    lift $ findWindow (window_DestroyNotifyEvent ev) (discardWindow dpy)
+destroyHandler :: EventHandler
+destroyHandler dpy inWins = withEvent $ \ev ->
+  let wid = window_DestroyNotifyEvent ev
+  in (S.filter ((/= wid) . winId) inWins, repaintById inWins wid)
 
-unmapNotifyHandler dpy = guarded $ \ev ->
-    lift $ findWindow (window_UnmapNotifyEvent ev) (discardWindow dpy)
+repaintById :: Seq Win -> WINDOW -> Maybe Repaint
+repaintById wins wid = do
+  ix <- S.findIndexL ((== wid) . winId) wins
+  return (repaintWindow (S.index ix inWins))
 
-mapNotifyHandler dpy = guarded $ \ev ->
-    void $ lift $ runMaybeT $ getWindow dpy (window_MapNotifyEvent ev) >>= mapWindow'
-  where mapWindow' win = lift $ withWindows (|> win)
+unmapHandler :: EventHandler
+unmapHandler dpy inWins = withEvent $ \ev ->
+  let wid = window_UnmapNotifyEvent ev
+  in fromMaybe (inWins, Nothing) $ do
+    ix <- S.findIndexL ((== wid) . winId) inWins
+    let outWin = (adjust (& mapped .~ False) ix inWins)
+    (S.filter ((/= wid) . _winId) inWins, repaintById inWins wid)
 
-reparentNotifyHandler dpy = guarded $ \ev -> do
-    let wid = window_ReparentNotifyEvent ev
-        prependWindow win = lift $ withWindows (win <|)
-    rootWindow <- lift $ gets root
-    if parent_ReparentNotifyEvent ev == rootWindow
-        then void $ lift $ runMaybeT $ getWindow dpy wid >>= prependWindow
-        else lift $ findWindow wid $ discardWindow dpy
+mapHandler :: EventHandler
+mapHandler dpy inState = withEvent $ \ev -> do
+  win <- getWindow dpy (window_MapNotifyEvent ev)
+  return (inState { wins = wins inState |> win }, Nothing)
 
-circulateNotifyHandler _ = guarded $ \ev -> do
-    lift $ withWindows $ \ws -> do
-        let wid = window_CirculateNotifyEvent ev
-            ws' = S.filter ((/= wid) . winId) ws
-            circulate wIx =
-                let win = S.index ws wIx
-                in case place_CirculateNotifyEvent ev of
-                    PlaceOnBottom -> win <| ws'
-                    PlaceOnTop -> ws' |> win
-        maybe ws circulate $ S.findIndexL ((== wid) . winId) ws
+reparentHandler :: EventHandler
+reparentHandler dpy inState = withEvent $ \ev -> do
+  outState <- if parent_ReparentNotifyEvent ev == root inState
+                then fmap (fromMaybe inState) $ runMaybeT $ do
+                  win <- getWindow dpy (window_ReparentNotifyEvent ev)
+                  return inState { wins = win <| wins inState }
+                else discardWindow dpy (window_ReparentNotifyEvent ev) inState
+  return (outState, Nothing)
 
-propertyNotifyHandler dpy = guarded $ \ev -> do
-    let wid = window_PropertyNotifyEvent ev
-    opacityAtom <- getAtom dpy "_NET_WM_WINDOW_OPACITY" False
-    if atom_PropertyNotifyEvent ev == opacityAtom
-        then do
-            newOpacity <- getWindowOpacity dpy wid
-            lift $ findWindowIx wid $ \ix -> do
-                win <- gets $ flip S.index ix . wins
-                damageWholeWindow dpy win
-                withWindows $ S.update ix $ win { winOpacity = newOpacity }
-        else return ()
+circulateHandler :: EventHandler
+circulateHandler dpy inState = withEvent $ \ev -> do
+  let wid = window_CirculateNotifyEvent
+      keeping = S.filter ((/= wid) . winId) (wins inState)
+      outWins = fromMaybe (wins inState) $ do
+        ix <- hoistMaybe $ S.findIndexL ((== wid) . winId) (wins inState)
+        let win = S.index ix (wins inState)
+        return $ case place_CirculateNotifyEvent ev of
+                   PlaceOnBottom -> win <| keeping
+                   PlaceOnTop -> keeping |> win
+  return (inState { wins = outWins }, Nothing)
+
+propertyHandler :: EventHandler
+propertyHandler dpy inState = withEvent $ \ev -> do
+  let wid = window_PropertyNotifyEvent ev
+  opacityAtom <- getAtom dpy "_NET_WM_WINDOW_OPACITY" False
+  if atom_PropertyNotifyEvent ev == opacityAtom
+    then do newOpacity <- getWindowOpacity dpy wid
+            outWins <- fmap (fromMaybe (wins inState)) $ runMaybeT $ do
+              winIx <- hoistMaybe $ S.findIndexL ((== wid) . winId) (wins inState)
+              let win = S.index winIx (wins inState)
+              liftIO $ damageWholeWindow dpy win
+              return (S.update winIx (win { winOpacity = newOpacity }))
+            return (inState { wins = outWins }, Nothing)
+    else return (inState, Nothing)
 
 
 -- Event Utilities ------------------------------------------------------
 
-guarded :: (Event e, Monad m) => (e -> m ()) -> SomeEvent -> m ()
-guarded f ev = mapM_ f $ fromEvent ev
-
+withEvent :: (Event e) => (e -> a) -> SomeEvent -> Maybe a
+withEvent f = fmap f . fromEvent

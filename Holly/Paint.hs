@@ -48,7 +48,7 @@ paint dpy = do
                 , destination_UnionRegion = overlayDamage
                 }
             destroyRegion dpy damaged
-        
+
         simpleComposite = MkComposite
             { op_Composite     = PictOpSrc
             , src_Composite    = pictNone
